@@ -19,6 +19,13 @@ export interface ReasoningStep {
   status: "ok" | "warn" | "running";
 }
 
+export interface WorkflowLogEntry {
+  id: string;
+  title: string;
+  detail: string;
+  status: "ok" | "warn" | "running";
+}
+
 export interface RedispatchProposal {
   trippedLine: string;
   loadingPct: number;
@@ -27,6 +34,13 @@ export interface RedispatchProposal {
   curtailmentMW: number;
   model: string;
   tools: string[];
+}
+
+export interface DashboardWorkflowResult {
+  stats: GridStats;
+  proposal: RedispatchProposal;
+  comparison: ComparisonMetrics;
+  gridsfm: GridSFMMetrics | null;
 }
 
 export interface ComparisonMetrics {
@@ -168,6 +182,54 @@ function formatNetworkName(networkId: string): string {
   return networkId.replace(/_/g, " ").replace(/\bcase\b/i, "Case").trim();
 }
 
+function statsFromScreen(data: ScreenData): GridStats {
+  return {
+    contingencies: data.total_contingencies,
+    dangerous: data.dangerous_count,
+    avgSolveTimeSec: Number((1.2 + data.dangerous_count * 0.03).toFixed(1)),
+    status: mapStatus(data.dangerous_count),
+    network: formatNetworkName(data.network_id),
+  };
+}
+
+function proposalFromResponses(screen: ScreenData, recommend: RecommendData): RedispatchProposal {
+  const hottest = screen.top_contingencies[0];
+  const actionDetail = recommend.proposals
+    .map((a) => `${a.action_type} ${a.target_id} ${a.value > 0 ? "+" : ""}${a.value.toFixed(1)}`)
+    .join(" · ");
+
+  return {
+    trippedLine: hottest?.component_id ?? "unknown",
+    loadingPct: Math.round((hottest?.violation_score ?? 1.0) * 100),
+    summary: recommend.rationale.join(" "),
+    curtailmentMW: recommend.proposals
+      .filter((p) => p.action_type === "curtail")
+      .reduce((t, p) => t + Math.max(0, p.value), 0),
+    model: recommend.mode === "llm_assisted" ? "llm-assisted" : "deterministic-baseline",
+    tools: ["pandapower", "grid-ops-backend"],
+    steps: [
+      {
+        id: "detect",
+        title: "Detect violation",
+        detail: `${hottest?.component_id ?? "unknown"}: ${Math.round((hottest?.violation_score ?? 1) * 100)}% risk score`,
+        status: "ok",
+      },
+      {
+        id: "propose",
+        title: "Propose remediation",
+        detail: actionDetail || "No action proposals.",
+        status: "ok",
+      },
+      {
+        id: "verify",
+        title: "Verify solution",
+        detail: recommend.accepted ? "safety gate passed" : "safety gate failed",
+        status: recommend.accepted ? "ok" : "warn",
+      },
+    ],
+  };
+}
+
 export const gridAgent = {
   setScenario: (config: GridScenarioConfig): void => {
     scenarioConfig = { ...config, seed: Number.isFinite(config.seed) ? Math.trunc(config.seed) : 42 };
@@ -176,6 +238,8 @@ export const gridAgent = {
   },
 
   getScenario: (): GridScenarioConfig => ({ ...scenarioConfig }),
+
+  prepareRun: async (): Promise<string> => ensureRunId(),
 
   listCases: async (): Promise<CaseOption[]> => {
     const data = await requestBackend<{ cases: CaseOption[] }>("/api/v1/cases");
@@ -189,13 +253,7 @@ export const gridAgent = {
       body: JSON.stringify({ top_k: 5 }),
       headers: { "Content-Type": "application/json" },
     });
-    return {
-      contingencies: data.total_contingencies,
-      dangerous: data.dangerous_count,
-      avgSolveTimeSec: Number((1.2 + data.dangerous_count * 0.03).toFixed(1)),
-      status: mapStatus(data.dangerous_count),
-      network: formatNetworkName(data.network_id),
-    };
+    return statsFromScreen(data);
   },
 
   proposal: async (): Promise<RedispatchProposal> => {
@@ -272,5 +330,110 @@ export const gridAgent = {
     } catch {
       return null;
     }
+  },
+
+  runWorkflow: async (
+    onLog?: (entry: WorkflowLogEntry) => void,
+  ): Promise<DashboardWorkflowResult> => {
+    const emit = (entry: WorkflowLogEntry) => onLog?.(entry);
+
+    emit({
+      id: "create",
+      title: "Create run",
+      detail: `${formatNetworkName(scenarioConfig.networkId)} · seed ${scenarioConfig.seed}`,
+      status: "running",
+    });
+    const runId = await ensureRunId();
+    emit({ id: "create", title: "Create run", detail: runId, status: "ok" });
+
+    emit({
+      id: "screen",
+      title: "Search contingency space",
+      detail: "screening N-1 outages and ranking violations",
+      status: "running",
+    });
+    const screen = await requestBackend<ScreenData>(`/api/v1/runs/${runId}/screen`, {
+      method: "POST",
+      body: JSON.stringify({ top_k: 5 }),
+      headers: { "Content-Type": "application/json" },
+    });
+    emit({
+      id: "screen",
+      title: "Search contingency space",
+      detail: `${screen.total_contingencies} contingencies · ${screen.dangerous_count} dangerous`,
+      status: screen.dangerous_count > 0 ? "warn" : "ok",
+    });
+
+    emit({
+      id: "recommend",
+      title: "Search corrective actions",
+      detail: "evaluating capped redispatch, voltage, tap, load and switching candidates",
+      status: "running",
+    });
+    const recommend = await requestBackend<RecommendData>(`/api/v1/runs/${runId}/recommend`, {
+      method: "POST",
+      body: JSON.stringify({ mode: "baseline" }),
+      headers: { "Content-Type": "application/json" },
+    });
+    emit({
+      id: "recommend",
+      title: "Search corrective actions",
+      detail: `${recommend.proposals.length} proposal(s) · cost ${recommend.total_cost.toFixed(2)}`,
+      status: recommend.accepted ? "ok" : "warn",
+    });
+
+    emit({
+      id: "compare",
+      title: "Verify and compare",
+      detail: "running baseline and assisted scoring using cached screening",
+      status: "running",
+    });
+    const compare = await requestBackend<CompareData>(`/api/v1/runs/${runId}/compare`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    emit({
+      id: "compare",
+      title: "Verify and compare",
+      detail: `${compare.winner} selected`,
+      status: "ok",
+    });
+
+    emit({
+      id: "gridsfm",
+      title: "Load GridSFM metadata",
+      detail: "checking sample availability",
+      status: "running",
+    });
+    let gridsfm: GridSFMMetrics | null = null;
+    try {
+      gridsfm = await requestBackend<GridSFMMetrics>(`/api/v1/runs/${runId}/gridsfm`);
+      emit({
+        id: "gridsfm",
+        title: "Load GridSFM metadata",
+        detail: `${gridsfm.case_name} · ${gridsfm.bus_count} buses`,
+        status: "ok",
+      });
+    } catch {
+      emit({
+        id: "gridsfm",
+        title: "Load GridSFM metadata",
+        detail: "not available for this run",
+        status: "warn",
+      });
+    }
+
+    return {
+      stats: statsFromScreen(screen),
+      proposal: proposalFromResponses(screen, recommend),
+      comparison: {
+        winner: compare.winner,
+        baselineScore: compare.baseline_score,
+        llmScore: compare.llm_score,
+        baselineCost: compare.baseline_cost,
+        llmCost: compare.llm_cost,
+      },
+      gridsfm,
+    };
   },
 };

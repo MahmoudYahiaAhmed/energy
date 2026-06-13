@@ -9,6 +9,7 @@ import {
   Github,
   LineChart,
   Loader2,
+  Play,
   Sparkles,
   Wrench,
   Bell,
@@ -23,6 +24,7 @@ import {
   type GridSFMMetrics,
   type GridStats,
   type RedispatchProposal,
+  type WorkflowLogEntry,
 } from "@/lib/gridagent-api";
 
 export const Route = createFileRoute("/")({
@@ -53,21 +55,31 @@ function Index() {
   const [cases, setCases] = useState<CaseOption[]>([]);
   const [selectedCase, setSelectedCase] = useState(gridAgent.getScenario().networkId);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [workflowLogs, setWorkflowLogs] = useState<WorkflowLogEntry[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
   const loadedRef = useRef(false);
 
   async function loadDashboard(): Promise<void> {
+    if (isRunning) return;
     try {
+      setIsRunning(true);
       setErrorMessage(null);
-      const [nextStats, nextProposal, nextComparison, nextGridsfm] = await Promise.all([
-        gridAgent.stats(),
-        gridAgent.proposal(),
-        gridAgent.compare(),
-        gridAgent.gridsfm(),
-      ]);
-      setStats(nextStats);
-      setProposal(nextProposal);
-      setComparison(nextComparison);
-      setGridsfm(nextGridsfm);
+      setStats(null);
+      setProposal(null);
+      setComparison(null);
+      setGridsfm(null);
+      setWorkflowLogs([]);
+
+      const result = await gridAgent.runWorkflow((entry) => {
+        setWorkflowLogs((current) => {
+          const next = current.filter((item) => item.id !== entry.id);
+          return [...next, entry];
+        });
+      });
+      setStats(result.stats);
+      setProposal(result.proposal);
+      setComparison(result.comparison);
+      setGridsfm(result.gridsfm);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown backend error.";
       setErrorMessage(message);
@@ -75,6 +87,12 @@ function Index() {
       setProposal(null);
       setComparison(null);
       setGridsfm(null);
+      setWorkflowLogs((current) => [
+        ...current.filter((item) => item.id !== "failed"),
+        { id: "failed", title: "Workflow stopped", detail: message, status: "warn" },
+      ]);
+    } finally {
+      setIsRunning(false);
     }
   }
 
@@ -87,7 +105,6 @@ function Index() {
     if (loadedRef.current) return;
     loadedRef.current = true;
     gridAgent.listCases().then(setCases).catch(() => {});
-    void loadDashboard();
   }, []);
 
   return (
@@ -108,7 +125,9 @@ function Index() {
           selected={selectedCase}
           onSelect={setSelectedCase}
           onRun={applyScenario}
+          isRunning={isRunning}
         />
+        <WorkflowLog logs={workflowLogs} isRunning={isRunning} />
         <Stats stats={stats} />
         <div className="mt-6 grid gap-6 lg:grid-cols-2">
           <GridStatePanel proposal={proposal} />
@@ -129,11 +148,13 @@ function CaseSelector({
   selected,
   onSelect,
   onRun,
+  isRunning,
 }: {
   cases: CaseOption[];
   selected: string;
   onSelect: (id: string) => void;
   onRun: () => void;
+  isRunning: boolean;
 }) {
   const grouped = cases.reduce<Record<string, CaseOption[]>>((acc, c) => {
     const group =
@@ -171,9 +192,11 @@ function CaseSelector({
         </div>
         <button
           onClick={onRun}
-          className="rounded-xl border border-primary/50 bg-primary/10 px-5 py-2 text-sm font-semibold text-primary transition hover:bg-primary/20"
+          disabled={isRunning}
+          className="inline-flex min-w-36 items-center justify-center gap-2 rounded-xl border border-primary/50 bg-primary/10 px-5 py-2 text-sm font-semibold text-primary transition hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          Run Scenario
+          {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+          {isRunning ? "Searching" : "Start Search"}
         </button>
       </div>
       {selected_case && (
@@ -193,6 +216,68 @@ function CaseSelector({
           <span className="text-xs text-muted-foreground self-center">available for this case</span>
         </div>
       )}
+    </section>
+  );
+}
+
+function WorkflowLog({ logs, isRunning }: { logs: WorkflowLogEntry[]; isRunning: boolean }) {
+  const visibleLogs =
+    logs.length > 0
+      ? logs
+      : [
+          {
+            id: "idle",
+            title: "Ready",
+            detail: "choose a case and start the search",
+            status: "ok" as const,
+          },
+        ];
+
+  return (
+    <section className="mt-4 rounded-2xl border border-border/60 bg-card/50 p-5 backdrop-blur">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Search log
+          </div>
+          <h3 className="mt-1 text-base font-semibold">
+            {isRunning ? "Exploring candidate space" : "Workflow state"}
+          </h3>
+        </div>
+        <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium ${
+          isRunning
+            ? "border-accent/40 bg-accent/10 text-accent"
+            : "border-primary/40 bg-primary/10 text-primary"
+        }`}>
+          {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          {isRunning ? "loading" : "idle"}
+        </span>
+      </div>
+      <ol className="mt-4 grid gap-2">
+        {visibleLogs.map((entry) => (
+          <li
+            key={entry.id}
+            className="flex items-start gap-3 rounded-xl border border-border/50 bg-background/50 p-3"
+          >
+            <div className="mt-0.5">
+              {entry.status === "running" ? (
+                <Loader2 className="h-4 w-4 animate-spin text-accent" />
+              ) : entry.status === "warn" ? (
+                <Activity className="h-4 w-4 text-[color:var(--warning)]" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4 text-primary" />
+              )}
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">{entry.title}</div>
+              <div className="mt-1 break-words font-mono text-xs text-muted-foreground">
+                {entry.detail}
+                {entry.status === "running" && <span className="animate-blink">▍</span>}
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }
@@ -575,7 +660,7 @@ function MetricCard({ label, value }: { label: string; value: string }) {
 
 function Architecture() {
   const steps = [
-    { icon: Database, title: "Grid data", sub: "pandapower / SMARD" },
+    { icon: Database, title: "Grid data", sub: "pandapower cases" },
     { icon: Wrench, title: "MCP tools", sub: "run_powerflow · screen_n1" },
     { icon: Brain, title: "LLM agent", sub: "reason · propose · explain", active: true },
     { icon: LineChart, title: "Result analysis", sub: "performance summary · archive findings" },

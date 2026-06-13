@@ -23,4 +23,7 @@ src/grid_ops_backend/services/screening_service.py
 src/grid_ops_backend/storage/__init__.py
 src/grid_ops_backend/storage/memory_repo.py
 tests/test_api.py
+tests/test_contingency.py
+tests/test_corrective_agent.py
 tests/test_services.py
+tests/test_violation_detector.py

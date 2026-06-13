@@ -50,6 +50,20 @@ def _build_case_list() -> list[dict]:
 _KNOWN_CASES = _build_case_list()
 
 
+def _latest_screening_counts(run: RunState) -> tuple[int, int] | None:
+    for event in reversed(run.events):
+        if event.get("type") != "screening_completed":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        dangerous_count = payload.get("dangerous_count")
+        total = payload.get("total")
+        if isinstance(dangerous_count, int) and isinstance(total, int):
+            return dangerous_count, total
+    return None
+
+
 def create_app() -> FastAPI:
     settings = load_settings()
     app = FastAPI(title="Grid Ops Backend", version="0.1.0")
@@ -144,11 +158,20 @@ def create_app() -> FastAPI:
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
 
-        screening = screening_service.run(
-            run_id=run_id, network_id=run.network_id, seed=run.seed, top_k=5
-        )
+        cached_screening = _latest_screening_counts(run)
+        if cached_screening is None:
+            screening = screening_service.run(
+                run_id=run_id, network_id=run.network_id, seed=run.seed, top_k=5
+            )
+            dangerous_count = screening.dangerous_count
+            run = run.with_event(
+                "screening_completed",
+                {"dangerous_count": screening.dangerous_count, "total": screening.total_contingencies},
+            )
+        else:
+            dangerous_count, _ = cached_screening
         recommendation = remediation_service.recommend(
-            run_id=run_id, mode=payload.mode.value, dangerous_count=screening.dangerous_count
+            run_id=run_id, mode=payload.mode.value, dangerous_count=dangerous_count
         )
         run = run.with_event(
             "recommendation_generated",
@@ -175,14 +198,23 @@ def create_app() -> FastAPI:
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
 
-        screening = screening_service.run(
-            run_id=run_id, network_id=run.network_id, seed=run.seed, top_k=5
-        )
+        cached_screening = _latest_screening_counts(run)
+        if cached_screening is None:
+            screening = screening_service.run(
+                run_id=run_id, network_id=run.network_id, seed=run.seed, top_k=5
+            )
+            dangerous_count = screening.dangerous_count
+            run = run.with_event(
+                "screening_completed",
+                {"dangerous_count": screening.dangerous_count, "total": screening.total_contingencies},
+            )
+        else:
+            dangerous_count, _ = cached_screening
         baseline = remediation_service.recommend(
-            run_id=run_id, mode="baseline", dangerous_count=screening.dangerous_count
+            run_id=run_id, mode="baseline", dangerous_count=dangerous_count
         )
         llm_assisted = remediation_service.recommend(
-            run_id=run_id, mode="llm_assisted", dangerous_count=screening.dangerous_count
+            run_id=run_id, mode="llm_assisted", dangerous_count=dangerous_count
         )
         comparison = comparison_service.compare(run_id, baseline, llm_assisted)
         run = run.with_event("comparison_completed", {"winner": comparison.winner})

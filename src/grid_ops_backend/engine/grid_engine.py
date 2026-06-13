@@ -75,17 +75,13 @@ class GridEngine:
     def _violation_score(self, net) -> float:
         max_line_loading = 0.0
         if hasattr(net, "res_line") and not net.res_line.empty:
-            max_line_loading = float(net.res_line.loading_percent.max())
-
-        vm_violations = 0.0
-        if hasattr(net, "res_bus") and not net.res_bus.empty:
-            vm = net.res_bus.vm_pu
-            vm_violations = float(((vm < 0.95) | (vm > 1.05)).sum())
+            if "loading_percent" in net.res_line.columns:
+                max_line_loading = float(net.res_line.loading_percent.max())
+            elif "p_from_mw" in net.res_line.columns:
+                max_line_loading = float(net.res_line.p_from_mw.abs().max())
 
         overload_component = max(0.0, (max_line_loading - 100.0) / 100.0)
-        voltage_component = min(0.5, vm_violations / max(1.0, float(len(net.bus))))
-
-        return min(1.0, overload_component + voltage_component)
+        return min(1.0, overload_component)
 
     def _screen_with_pandapower(
         self, network_id: str, max_cases: int
@@ -102,7 +98,7 @@ class GridEngine:
             original_state = bool(net.line.at[idx, "in_service"])
             net.line.at[idx, "in_service"] = False
             try:
-                pp.runpp(net, init="dc", enforce_q_lims=True)
+                pp.rundcpp(net)
                 score = self._violation_score(net)
             except Exception:
                 score = 1.0
@@ -125,7 +121,7 @@ class GridEngine:
                 original_state = bool(net.gen.at[idx, "in_service"])
                 net.gen.at[idx, "in_service"] = False
                 try:
-                    pp.runpp(net, init="dc", enforce_q_lims=True)
+                    pp.rundcpp(net)
                     score = self._violation_score(net)
                 except Exception:
                     score = 1.0

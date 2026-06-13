@@ -201,17 +201,21 @@ def _branch_coordinates(
 def bus_voltage_table(net: pp.pandapowerNet) -> pd.DataFrame:
     if not hasattr(net, "res_bus"):
         return pd.DataFrame()
-    table = net.res_bus[["vm_pu", "va_degree"]].join(net.bus[["name", "min_vm_pu", "max_vm_pu"]])
-    table["status"] = table.apply(lambda row: "violation" if row.vm_pu < row.min_vm_pu or row.vm_pu > row.max_vm_pu else "normal", axis=1)
+    columns = [column for column in ["va_degree", "p_mw"] if column in net.res_bus.columns]
+    table = net.res_bus[columns].join(net.bus[["name"]])
+    table["status"] = "dc solved"
     return table.reset_index(names="bus")
 
 
 def line_loading_table(net: pp.pandapowerNet) -> pd.DataFrame:
     if not hasattr(net, "res_line"):
         return pd.DataFrame()
-    table = net.res_line[["loading_percent", "p_from_mw", "p_to_mw"]].join(
+    result_columns = [column for column in ["loading_percent", "p_from_mw", "p_to_mw"] if column in net.res_line.columns]
+    table = net.res_line[result_columns].join(
         net.line[["from_bus", "to_bus", "max_loading_percent", "in_service"]]
     )
+    if "loading_percent" not in table.columns:
+        table["loading_percent"] = table["p_from_mw"].abs() if "p_from_mw" in table.columns else 0.0
     table["status"] = table.apply(_line_status_row, axis=1)
     return table.reset_index(names="line")
 
@@ -219,12 +223,14 @@ def line_loading_table(net: pp.pandapowerNet) -> pd.DataFrame:
 def generator_table(net: pp.pandapowerNet) -> pd.DataFrame:
     frames = []
     if len(net.ext_grid) and hasattr(net, "res_ext_grid"):
-        ext = net.ext_grid[["bus", "in_service"]].join(net.res_ext_grid[["p_mw", "q_mvar"]])
+        ext_columns = [column for column in ["p_mw", "q_mvar"] if column in net.res_ext_grid.columns]
+        ext = net.ext_grid[["bus", "in_service"]].join(net.res_ext_grid[ext_columns])
         ext["type"] = "ext_grid"
         ext["element"] = ext.index
         frames.append(ext)
     if len(net.gen) and hasattr(net, "res_gen"):
-        gen = net.gen[["bus", "p_mw", "in_service"]].join(net.res_gen[["q_mvar", "vm_pu"]])
+        gen_columns = [column for column in ["p_mw", "q_mvar", "vm_pu"] if column in net.res_gen.columns]
+        gen = net.gen[["bus", "p_mw", "in_service"]].join(net.res_gen[gen_columns], rsuffix="_result")
         gen["type"] = "gen"
         gen["element"] = gen.index
         frames.append(gen)
@@ -255,18 +261,14 @@ def _line_color(net: pp.pandapowerNet, data: dict) -> str:
 def _bus_color(net: pp.pandapowerNet, bus: int) -> str:
     if not hasattr(net, "res_bus") or bus not in net.res_bus.index:
         return "gray"
-    vm_pu = float(net.res_bus.at[bus, "vm_pu"])
-    min_vm = float(net.bus.at[bus, "min_vm_pu"])
-    max_vm = float(net.bus.at[bus, "max_vm_pu"])
-    if vm_pu < min_vm or vm_pu > max_vm:
-        return "red"
     return "green"
 
 
 def _bus_hover(net: pp.pandapowerNet, bus: int) -> str:
     name = net.bus.at[bus, "name"] if "name" in net.bus.columns else bus
     if hasattr(net, "res_bus") and bus in net.res_bus.index:
-        return f"Bus {bus} ({name})<br>Voltage: {net.res_bus.at[bus, 'vm_pu']:.3f} pu"
+        if "va_degree" in net.res_bus.columns:
+            return f"Bus {bus} ({name})<br>Angle: {net.res_bus.at[bus, 'va_degree']:.3f} deg"
     return f"Bus {bus} ({name})"
 
 

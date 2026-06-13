@@ -8,6 +8,11 @@ This project exposes a frontend-ready API for:
 - baseline vs LLM-assisted comparison metrics
 - run progress streaming via Server-Sent Events (SSE)
 
+The local Streamlit prototype can run either DC power flow (`pandapower.rundcpp`) or AC power flow
+(`pandapower.runpp`). DC mode is faster and checks active-power thermal loading only. AC mode is
+slower but also checks voltage magnitudes and enables voltage/reactive corrective actions. The app
+includes IEEE 9, 14, 30, 57, 118, and 300-bus pandapower examples.
+
 ## Quick start
 
 ```bash

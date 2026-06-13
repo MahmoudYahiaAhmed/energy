@@ -5,12 +5,21 @@ from corrective_agent import AgentResult
 from violation_detector import ViolationReport
 
 
-def explain_result(contingency: Contingency, post_report: ViolationReport, agent_result: AgentResult) -> str:
+def explain_result(
+    contingency: Contingency,
+    post_report: ViolationReport,
+    agent_result: AgentResult,
+    power_flow_mode: str = "dc",
+) -> str:
+    mode_name = "AC" if power_flow_mode == "ac" else "DC"
     failed = f"The selected N-1 event removed {contingency.label} from service."
     if post_report.is_safe:
-        violation = "The post-contingency case stayed inside the configured line-loading and voltage limits."
+        if power_flow_mode == "ac":
+            violation = "The post-contingency case stayed inside the configured thermal and voltage limits."
+        else:
+            violation = "The post-contingency case stayed inside the configured DC thermal line-loading limits."
     elif not post_report.converged:
-        violation = "The post-contingency AC power flow did not converge, which is treated as unsafe."
+        violation = f"The post-contingency {mode_name} power flow did not converge, which is treated as unsafe."
     else:
         parts = []
         if len(post_report.overloaded_lines):
@@ -39,7 +48,7 @@ def explain_result(contingency: Contingency, post_report: ViolationReport, agent
         if chosen.safe:
             helped = (
                 "Pandapower validation found no remaining hard violations after the final greedy step. "
-                "Each accepted step reduced the scored combination of overload, voltage deviation, and intervention cost."
+                "Each accepted step reduced the scored combination of overload and intervention cost."
             )
         else:
             helped = (
@@ -51,7 +60,7 @@ def explain_result(contingency: Contingency, post_report: ViolationReport, agent
         if chosen.safe:
             helped = (
                 "Pandapower validation found no remaining hard violations after this action. "
-                "It helped by reducing the scored combination of overload, voltage deviation, and intervention cost."
+                "It helped by reducing the scored combination of overload and intervention cost."
             )
         else:
             helped = (

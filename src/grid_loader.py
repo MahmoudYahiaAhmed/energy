@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 
 import pandapower as pp
 import pandapower.networks as pn
+
+PowerFlowMode = Literal["dc", "ac"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,51 @@ NETWORKS: dict[str, NetworkOption] = {
         description="Very small transmission test case for fast demonstrations.",
         factory=pn.case9,
     ),
+    "IEEE 30-bus": NetworkOption(
+        name="IEEE 30-bus",
+        description="Medium-small test case with more branches and generators than IEEE 14-bus.",
+        factory=pn.case30,
+    ),
+    "IEEE 57-bus": NetworkOption(
+        name="IEEE 57-bus",
+        description="Medium transmission test case with a richer N-1 contingency space.",
+        factory=pn.case57,
+    ),
+    "IEEE 118-bus": NetworkOption(
+        name="IEEE 118-bus",
+        description="Larger IEEE test case suited for DC N-1 screening experiments.",
+        factory=pn.case118,
+    ),
+    "IEEE 300-bus": NetworkOption(
+        name="IEEE 300-bus",
+        description="Large MATPOWER-derived case for more substantial DC screening runs.",
+        factory=pn.case300,
+    ),
+    "case1354pegase": NetworkOption(
+        name="case1354pegase",
+        description="Large PEGASE case suitable for testing GridSFM-size guards and pandapower AC validation.",
+        factory=lambda: getattr(pn, "case1354pegase")(),
+    ),
+    "case1888rte": NetworkOption(
+        name="case1888rte",
+        description="Large RTE case suitable for GridSFM-size screening experiments.",
+        factory=lambda: getattr(pn, "case1888rte")(),
+    ),
+    "case2848rte": NetworkOption(
+        name="case2848rte",
+        description="Large RTE case suitable for GridSFM-size screening experiments.",
+        factory=lambda: getattr(pn, "case2848rte")(),
+    ),
+    "case6470rte": NetworkOption(
+        name="case6470rte",
+        description="Very large RTE case for optional large-network experiments.",
+        factory=lambda: getattr(pn, "case6470rte")(),
+    ),
+    "case9241pegase": NetworkOption(
+        name="case9241pegase",
+        description="Very large PEGASE case for optional large-network experiments.",
+        factory=lambda: getattr(pn, "case9241pegase")(),
+    ),
 }
 
 
@@ -33,7 +80,7 @@ def available_networks() -> list[str]:
 
 
 def load_network(name: str = "IEEE 14-bus") -> pp.pandapowerNet:
-    option = NETWORKS.get(name)
+    option = NETWORKS.get(name) or _network_by_alias(name)
     if option is None:
         raise ValueError(f"Unknown network '{name}'. Choose one of: {', '.join(available_networks())}")
 
@@ -43,15 +90,40 @@ def load_network(name: str = "IEEE 14-bus") -> pp.pandapowerNet:
     return net
 
 
-def run_power_flow(net: pp.pandapowerNet) -> bool:
+def _network_by_alias(name: str) -> NetworkOption | None:
+    normalized = name.lower().strip().replace("_", "").replace("-", "").replace(" ", "")
+    aliases = {
+        "case9": "IEEE 9-bus",
+        "ieee9": "IEEE 9-bus",
+        "case14": "IEEE 14-bus",
+        "ieee14": "IEEE 14-bus",
+        "case30": "IEEE 30-bus",
+        "ieee30": "IEEE 30-bus",
+        "case57": "IEEE 57-bus",
+        "ieee57": "IEEE 57-bus",
+        "case118": "IEEE 118-bus",
+        "ieee118": "IEEE 118-bus",
+        "case300": "IEEE 300-bus",
+        "ieee300": "IEEE 300-bus",
+        "case1354pegase": "case1354pegase",
+        "case1888rte": "case1888rte",
+        "case2848rte": "case2848rte",
+        "case6470rte": "case6470rte",
+        "case9241pegase": "case9241pegase",
+    }
+    canonical = aliases.get(normalized)
+    return NETWORKS.get(canonical) if canonical else None
+
+
+def run_power_flow(net: pp.pandapowerNet, mode: PowerFlowMode = "dc") -> bool:
     try:
-        pp.runpp(net, calculate_voltage_angles=True, init="auto")
+        if mode == "ac":
+            pp.runpp(net, calculate_voltage_angles=True, init="dc")
+        else:
+            pp.rundcpp(net)
     except Exception:
-        try:
-            pp.runpp(net, calculate_voltage_angles=False, init="dc")
-        except Exception:
-            net.converged = False
-            return False
+        net.converged = False
+        return False
     return bool(getattr(net, "converged", False))
 
 
