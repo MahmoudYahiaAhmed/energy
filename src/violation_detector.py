@@ -19,6 +19,14 @@ class ViolationReport:
         return sum(len(frame) for frame in self.frames())
 
     @property
+    def low_voltage_count(self) -> int:
+        return len(self.low_voltage_buses)
+
+    @property
+    def high_voltage_count(self) -> int:
+        return len(self.high_voltage_buses)
+
+    @property
     def is_safe(self) -> bool:
         return self.converged and self.violation_count == 0
 
@@ -51,6 +59,40 @@ class ViolationReport:
             total += float(self.high_voltage_buses["high_deviation_pu"].clip(lower=0.0).sum())
         return total
 
+    @property
+    def low_voltage_severity(self) -> float:
+        if self.low_voltage_buses.empty:
+            return 0.0
+        return float(self.low_voltage_buses["low_deviation_pu"].clip(lower=0.0).sum())
+
+    @property
+    def high_voltage_severity(self) -> float:
+        if self.high_voltage_buses.empty:
+            return 0.0
+        return float(self.high_voltage_buses["high_deviation_pu"].clip(lower=0.0).sum())
+
+    @property
+    def max_low_voltage_deviation(self) -> float:
+        if self.low_voltage_buses.empty:
+            return 0.0
+        return float(self.low_voltage_buses["low_deviation_pu"].clip(lower=0.0).max())
+
+    @property
+    def max_high_voltage_deviation(self) -> float:
+        if self.high_voltage_buses.empty:
+            return 0.0
+        return float(self.high_voltage_buses["high_deviation_pu"].clip(lower=0.0).max())
+
+    @property
+    def max_voltage_deviation(self) -> float:
+        return max(self.max_low_voltage_deviation, self.max_high_voltage_deviation)
+
+    @property
+    def violated_voltage_buses(self) -> set[int]:
+        return set(int(idx) for idx in self.low_voltage_buses.index).union(
+            int(idx) for idx in self.high_voltage_buses.index
+        )
+
     def to_summary(self) -> dict[str, float | int | bool]:
         return {
             "converged": self.converged,
@@ -58,6 +100,9 @@ class ViolationReport:
             "line_overload_severity": self.line_overload_severity,
             "trafo_overload_severity": self.trafo_overload_severity,
             "voltage_deviation_severity": self.voltage_deviation_severity,
+            "low_voltage_count": self.low_voltage_count,
+            "high_voltage_count": self.high_voltage_count,
+            "max_voltage_deviation": self.max_voltage_deviation,
         }
 
 

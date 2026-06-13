@@ -3,6 +3,7 @@ from grid_ops_backend.domain.models import Contingency, Severity
 from grid_ops_backend.services.comparison_service import ComparisonService
 from grid_ops_backend.services.remediation_service import RemediationService
 from grid_ops_backend.services.screening_service import ScreeningService
+from grid_loader import available_networks, load_network
 
 
 class CountingEngine:
@@ -59,3 +60,13 @@ def test_comparison_returns_valid_winner() -> None:
     result = comparison.compare("r1", baseline, llm)
 
     assert result.winner in {"baseline", "llm_assisted"}
+
+
+def test_case89pegase_is_available_as_small_pegase_case() -> None:
+    assert "case89pegase" in available_networks()
+
+    net = load_network("pegase89")
+
+    assert len(net.bus) == 89
+    assert len(net.line) > 0
+    assert len(net.trafo) > 0

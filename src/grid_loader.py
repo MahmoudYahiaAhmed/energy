@@ -47,6 +47,11 @@ NETWORKS: dict[str, NetworkOption] = {
         description="Large MATPOWER-derived case for more substantial DC screening runs.",
         factory=pn.case300,
     ),
+    "case89pegase": NetworkOption(
+        name="case89pegase",
+        description="Small PEGASE transmission case with 89 buses; useful for faster AC corrective-action experiments.",
+        factory=lambda: getattr(pn, "case89pegase")(),
+    ),
     "case1354pegase": NetworkOption(
         name="case1354pegase",
         description="Large PEGASE case suitable for testing GridSFM-size guards and pandapower AC validation.",
@@ -105,6 +110,9 @@ def _network_by_alias(name: str) -> NetworkOption | None:
         "ieee118": "IEEE 118-bus",
         "case300": "IEEE 300-bus",
         "ieee300": "IEEE 300-bus",
+        "case89pegase": "case89pegase",
+        "pegase89": "case89pegase",
+        "89pegase": "case89pegase",
         "case1354pegase": "case1354pegase",
         "case1888rte": "case1888rte",
         "case2848rte": "case2848rte",
