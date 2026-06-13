@@ -3,10 +3,16 @@ uvicorn>=0.30.0
 pydantic>=2.8.0
 python-dotenv>=1.0.0
 httpx>=0.27.0
+
+# Grid simulation and analysis
 pandapower>=2.14.0
-streamlit>=1.35.0
-plotly>=5.22.0
-networkx>=3.2.0
 pandas>=2.1.0
 numpy>=1.26.0
+networkx>=3.2.0
+
+# Streamlit prototype and plotting
+streamlit>=1.35.0
+plotly>=5.22.0
+
+# Test tooling
 pytest>=8.3.0
