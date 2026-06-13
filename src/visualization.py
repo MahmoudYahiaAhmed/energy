@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import networkx as nx
+import numpy as np
 import pandas as pd
 import pandapower as pp
 import plotly.graph_objects as go
@@ -10,19 +11,21 @@ import plotly.graph_objects as go
 
 def network_figure(net: pp.pandapowerNet, title: str = "Grid topology") -> go.Figure:
     graph = nx.Graph()
-    for bus_idx in net.bus.index:
-        graph.add_node(int(bus_idx))
-    for line_idx, row in net.line.iterrows():
-        graph.add_edge(int(row.from_bus), int(row.to_bus))
-    for trafo_idx, row in net.trafo.iterrows():
-        graph.add_edge(int(row.hv_bus), int(row.lv_bus))
+    graph.add_nodes_from(int(bus_idx) for bus_idx in net.bus.index)
+
+    if len(net.line):
+        line_edges = net.line[["from_bus", "to_bus"]].to_numpy(dtype=int)
+        graph.add_edges_from((int(u), int(v)) for u, v in line_edges)
+    if len(net.trafo):
+        trafo_edges = net.trafo[["hv_bus", "lv_bus"]].to_numpy(dtype=int)
+        graph.add_edges_from((int(u), int(v)) for u, v in trafo_edges)
 
     pos = nx.spring_layout(graph, seed=8) if len(graph) else {}
     fig = go.Figure()
     branch_counts = _branch_counts(net)
     branch_seen: dict[tuple[int, int], int] = {}
 
-    for line_idx, row in net.line.iterrows():
+    for row in net.line.itertuples():
         u = int(row.from_bus)
         v = int(row.to_bus)
         order = _next_branch_order(branch_seen, u, v)
@@ -33,13 +36,13 @@ def network_figure(net: pp.pandapowerNet, title: str = "Grid topology") -> go.Fi
             u=u,
             v=v,
             element="line",
-            index=int(line_idx),
-            in_service=bool(row.get("in_service", True)),
+            index=int(row.Index),
+            in_service=bool(getattr(row, "in_service", True)),
             order=order,
             total=branch_counts[_branch_key(u, v)],
         )
 
-    for trafo_idx, row in net.trafo.iterrows():
+    for row in net.trafo.itertuples():
         u = int(row.hv_bus)
         v = int(row.lv_bus)
         order = _next_branch_order(branch_seen, u, v)
@@ -50,8 +53,8 @@ def network_figure(net: pp.pandapowerNet, title: str = "Grid topology") -> go.Fi
             u=u,
             v=v,
             element="trafo",
-            index=int(trafo_idx),
-            in_service=bool(row.get("in_service", True)),
+            index=int(row.Index),
+            in_service=bool(getattr(row, "in_service", True)),
             order=order,
             total=branch_counts[_branch_key(u, v)],
         )
@@ -132,12 +135,12 @@ def _add_generator_traces(fig: go.Figure, net: pp.pandapowerNet, pos: dict[int, 
     if not len(net.gen):
         return
 
-    for gen_idx, row in net.gen.iterrows():
+    for row in net.gen.itertuples():
         bus = int(row.bus)
         if bus not in pos:
             continue
         x, y = pos[bus]
-        in_service = bool(row.get("in_service", True))
+        in_service = bool(getattr(row, "in_service", True))
         fig.add_trace(
             go.Scatter(
                 x=[x + 0.035],
@@ -150,21 +153,28 @@ def _add_generator_traces(fig: go.Figure, net: pp.pandapowerNet, pos: dict[int, 
                     line=dict(width=1, color="#222"),
                 ),
                 hoverinfo="text",
-                text=f"Generator {int(gen_idx)} at bus {bus}<br>{'in service' if in_service else 'out of service'}",
+                text=f"Generator {int(row.Index)} at bus {bus}<br>{'in service' if in_service else 'out of service'}",
                 showlegend=False,
             )
         )
 
 
 def _branch_counts(net: pp.pandapowerNet) -> dict[tuple[int, int], int]:
-    counts: dict[tuple[int, int], int] = {}
-    for _, row in net.line.iterrows():
-        key = _branch_key(int(row.from_bus), int(row.to_bus))
-        counts[key] = counts.get(key, 0) + 1
-    for _, row in net.trafo.iterrows():
-        key = _branch_key(int(row.hv_bus), int(row.lv_bus))
-        counts[key] = counts.get(key, 0) + 1
-    return counts
+    pairs: list[pd.DataFrame] = []
+
+    if len(net.line):
+        line_pairs = np.sort(net.line[["from_bus", "to_bus"]].to_numpy(dtype=int), axis=1)
+        pairs.append(pd.DataFrame(line_pairs, columns=["u", "v"]))
+
+    if len(net.trafo):
+        trafo_pairs = np.sort(net.trafo[["hv_bus", "lv_bus"]].to_numpy(dtype=int), axis=1)
+        pairs.append(pd.DataFrame(trafo_pairs, columns=["u", "v"]))
+
+    if not pairs:
+        return {}
+
+    counts = pd.concat(pairs, ignore_index=True).value_counts(sort=False)
+    return {(int(u), int(v)): int(count) for (u, v), count in counts.items()}
 
 
 def _next_branch_order(seen: dict[tuple[int, int], int], u: int, v: int) -> int:

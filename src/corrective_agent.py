@@ -7,6 +7,7 @@ import logging
 import math
 from typing import Any, Literal
 
+import numpy as np
 import pandas as pd
 import pandapower as pp
 
@@ -16,6 +17,8 @@ from scoring import ScoreBreakdown, estimate_action_cost, score_network, score_s
 from violation_detector import ViolationReport, detect_violations
 
 logger = logging.getLogger(__name__)
+
+PerformanceMode = Literal["balanced", "fast", "max_speed", "auto"]
 
 
 @dataclass(frozen=True)
@@ -345,15 +348,15 @@ def run_corrective_agent(
     report: ViolationReport,
     max_steps: int = 12,
     power_flow_mode: PowerFlowMode = "dc",
+    performance_mode: PerformanceMode = "auto",
 ) -> AgentResult:
     observation = _observe(report, power_flow_mode)
     thought = _think(report, power_flow_mode)
-    config = CorrectiveOptimizerConfig(
-        mode=power_flow_mode,
-        max_greedy_steps=max_steps,
-        include_voltage=power_flow_mode == "ac",
-        allow_line_switching=False,
-        use_gridsfm=False,
+    config = _agent_optimizer_config(
+        net=net,
+        power_flow_mode=power_flow_mode,
+        max_steps=max_steps,
+        performance_mode=performance_mode,
     )
     if report.is_safe:
         return AgentResult(observation, thought, [], None, deepcopy(net), [], "already_stable")
@@ -437,6 +440,85 @@ def generate_candidate_actions(
         use_gridsfm=False,
     )
     return generate_corrective_candidates(net, report, config)
+
+
+def _agent_optimizer_config(
+    net: pp.pandapowerNet,
+    power_flow_mode: PowerFlowMode,
+    max_steps: int,
+    performance_mode: PerformanceMode,
+) -> CorrectiveOptimizerConfig:
+    bus_count = int(len(net.bus)) if hasattr(net, "bus") else 0
+    profile = performance_mode
+    if performance_mode == "auto":
+        profile = "max_speed" if bus_count >= 1000 else "fast" if bus_count >= 118 else "balanced"
+
+    base_kwargs: dict[str, Any] = {
+        "mode": power_flow_mode,
+        "max_greedy_steps": max_steps,
+        "include_voltage": power_flow_mode == "ac",
+        "allow_line_switching": False,
+        "use_gridsfm": False,
+    }
+
+    if profile == "balanced":
+        return CorrectiveOptimizerConfig(**base_kwargs)
+
+    if profile == "fast":
+        return CorrectiveOptimizerConfig(
+            **base_kwargs,
+            max_greedy_steps=min(max_steps, 8),
+            max_candidates_total=180,
+            max_candidates_per_type=45,
+            max_gen_redispatch_candidates=24,
+            max_gen_voltage_setpoint_candidates=20,
+            max_trafo_tap_candidates=16,
+            max_ext_grid_voltage_candidates=8,
+            max_reactive_load_candidates=10,
+            max_load_curtailment_candidates=10,
+            action_space=ActionSpaceConfig(
+                redispatch_step_fracs=(0.05, 0.10),
+                redispatch_max_mw_per_action=80.0,
+                voltage_setpoint_deltas_pu=(-0.01, 0.01),
+                ext_grid_voltage_deltas_pu=(-0.01, 0.01),
+                tap_step_deltas=(-1, 1),
+                reactive_load_step_fracs=(-0.10, 0.10),
+                load_curtailment_fracs=(0.02, 0.05),
+                max_total_curtailment_frac=0.10,
+                local_bus_radius=2,
+                candidate_dedup=True,
+                line_switch_allowlist=(),
+                allow_islanding=False,
+            ),
+        )
+
+    return CorrectiveOptimizerConfig(
+        **base_kwargs,
+        max_greedy_steps=min(max_steps, 4),
+        max_candidates_total=72,
+        max_candidates_per_type=18,
+        max_gen_redispatch_candidates=12,
+        max_gen_voltage_setpoint_candidates=8,
+        max_trafo_tap_candidates=8,
+        max_ext_grid_voltage_candidates=4,
+        max_reactive_load_candidates=0,
+        max_load_curtailment_candidates=8,
+        allow_reactive_load_adjustment=False,
+        action_space=ActionSpaceConfig(
+            redispatch_step_fracs=(0.10,),
+            redispatch_max_mw_per_action=60.0,
+            voltage_setpoint_deltas_pu=(-0.01, 0.01),
+            ext_grid_voltage_deltas_pu=(-0.01, 0.01),
+            tap_step_deltas=(-1, 1),
+            reactive_load_step_fracs=(),
+            load_curtailment_fracs=(0.05,),
+            max_total_curtailment_frac=0.08,
+            local_bus_radius=1,
+            candidate_dedup=True,
+            line_switch_allowlist=(),
+            allow_islanding=False,
+        ),
+    )
 
 
 def generate_corrective_candidates(
@@ -538,19 +620,23 @@ def _gen_voltage_setpoint_actions(
     if not len(net.gen) or "vm_pu" not in net.gen.columns:
         return []
     rows = _local_or_all(_in_service_rows(net.gen), affected)
+    deltas = np.asarray(config.action_space.voltage_setpoint_deltas_pu, dtype=float)
     actions: list[CorrectiveAction] = []
-    for idx, row in rows.iterrows():
-        current = row.get("vm_pu")
+    for row in rows.itertuples():
+        idx = int(row.Index)
+        current = getattr(row, "vm_pu", None)
         if not _is_finite_number(current):
             continue
-        vmin, vmax = _bus_voltage_limits(net, int(row.bus))
-        for delta in config.action_space.voltage_setpoint_deltas_pu:
-            new_vm = min(vmax, max(vmin, float(current) + delta))
-            if math.isclose(new_vm, float(current), abs_tol=1e-5):
-                continue
+        bus = int(row.bus)
+        vmin, vmax = _bus_voltage_limits(net, bus)
+        current_value = float(current)
+        new_values = np.clip(current_value + deltas, vmin, vmax)
+        valid_mask = ~np.isclose(new_values, current_value, atol=1e-5)
+        for delta, new_vm in zip(deltas[valid_mask], new_values[valid_mask]):
             actions.append(
                 CorrectiveAction(
-                    "gen_voltage_setpoint", "gen", int(idx), {"vm_pu": round(new_vm, 6), "delta_pu": delta},
+                    "gen_voltage_setpoint", "gen", idx,
+                    {"vm_pu": round(float(new_vm), 6), "delta_pu": float(delta)},
                     cost=abs(delta) * 100.0, disruptive_rank=1,
                     reason=f"Set generator {idx} voltage target to {new_vm:.3f} pu",
                 )
@@ -566,20 +652,23 @@ def _ext_grid_voltage_setpoint_actions(
     if not len(net.ext_grid) or "vm_pu" not in net.ext_grid.columns:
         return []
     rows = _local_or_all(_in_service_rows(net.ext_grid), affected)
+    deltas = np.asarray(config.action_space.ext_grid_voltage_deltas_pu, dtype=float)
     actions: list[CorrectiveAction] = []
-    for idx, row in rows.iterrows():
-        current = row.get("vm_pu")
+    for row in rows.itertuples():
+        idx = int(row.Index)
+        current = getattr(row, "vm_pu", None)
         if not _is_finite_number(current):
             continue
-        vmin, vmax = _bus_voltage_limits(net, int(row.bus))
-        for delta in config.action_space.ext_grid_voltage_deltas_pu:
-            new_vm = min(vmax, max(vmin, float(current) + delta))
-            if math.isclose(new_vm, float(current), abs_tol=1e-5):
-                continue
+        bus = int(row.bus)
+        vmin, vmax = _bus_voltage_limits(net, bus)
+        current_value = float(current)
+        new_values = np.clip(current_value + deltas, vmin, vmax)
+        valid_mask = ~np.isclose(new_values, current_value, atol=1e-5)
+        for delta, new_vm in zip(deltas[valid_mask], new_values[valid_mask]):
             actions.append(
                 CorrectiveAction(
-                    "ext_grid_voltage_setpoint", "ext_grid", int(idx),
-                    {"vm_pu": round(new_vm, 6), "delta_pu": delta},
+                    "ext_grid_voltage_setpoint", "ext_grid", idx,
+                    {"vm_pu": round(float(new_vm), 6), "delta_pu": float(delta)},
                     cost=abs(delta) * 125.0, disruptive_rank=2,
                     reason=f"Set external grid {idx} voltage target to {new_vm:.3f} pu",
                 )
@@ -690,30 +779,36 @@ def _load_curtailment_actions(
     rows = _local_or_all(_in_service_rows(net.load), affected)
     total_load = float(rows["p_mw"].clip(lower=0.0).sum()) if "p_mw" in rows.columns else 0.0
     max_total = total_load * config.action_space.max_total_curtailment_frac
+    fractions = np.asarray(config.action_space.load_curtailment_fracs, dtype=float)
     actions: list[CorrectiveAction] = []
-    for idx, row in rows.sort_values("p_mw", ascending=False).iterrows():
-        p = max(0.0, float(row.get("p_mw", 0.0)))
-        q = float(row.get("q_mvar", 0.0))
+    for row in rows.sort_values("p_mw", ascending=False).itertuples():
+        idx = int(row.Index)
+        p = max(0.0, float(getattr(row, "p_mw", 0.0)))
+        q = float(getattr(row, "q_mvar", 0.0))
         if p <= 1e-9:
             continue
-        for frac in config.action_space.load_curtailment_fracs:
-            curtailed_p = min(p * frac, max_total)
-            if curtailed_p <= 1e-9:
-                continue
-            scale = max(0.0, 1.0 - curtailed_p / p)
-            new_p = p * scale
-            new_q = q * scale
+        curtailed = np.minimum(p * fractions, max_total)
+        valid_mask = curtailed > 1e-9
+        valid_curtail = curtailed[valid_mask]
+        valid_fracs = fractions[valid_mask]
+        if not len(valid_curtail):
+            continue
+        new_p_values = np.maximum(0.0, p - valid_curtail)
+        scale_values = np.maximum(0.0, new_p_values / p)
+        new_q_values = q * scale_values
+        for frac, new_p, new_q in zip(valid_fracs, new_p_values, new_q_values):
+            curtailed_p = p - float(new_p)
             actions.append(
                 CorrectiveAction(
-                    "load_curtailment", "load", int(idx),
+                    "load_curtailment", "load", idx,
                     {
-                        "p_mw": round(new_p, 6),
-                        "q_mvar": round(new_q, 6),
-                        "curtail_p_mw": round(p - new_p, 6),
-                        "fraction": frac,
+                        "p_mw": round(float(new_p), 6),
+                        "q_mvar": round(float(new_q), 6),
+                        "curtail_p_mw": round(float(curtailed_p), 6),
+                        "fraction": float(frac),
                     },
-                    cost=(p - new_p) * 1000.0, disruptive_rank=10,
-                    reason=f"Curtail load {idx} by {p - new_p:.2f} MW",
+                    cost=curtailed_p * 1000.0, disruptive_rank=10,
+                    reason=f"Curtail load {idx} by {curtailed_p:.2f} MW",
                 )
             )
     return actions

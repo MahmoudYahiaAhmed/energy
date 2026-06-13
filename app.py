@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
@@ -109,6 +110,12 @@ st.caption(
 with st.sidebar:
     st.header("Study setup")
     network_name = st.selectbox("Sample grid", available_networks(), index=0)
+    compute_profile = st.selectbox(
+        "Compute profile",
+        ["Auto", "Balanced", "Fast", "Max speed"],
+        index=2,
+        help="Fast and Max speed reduce bus-level candidate search and use smaller action sets for quicker results.",
+    )
     power_flow_label = st.selectbox(
         "Power-flow model",
         ["DC power flow", "AC power flow"],
@@ -136,7 +143,22 @@ base_report = detect_violations(net, include_voltage=power_flow_mode == "ac")
 post_net = apply_contingency(net, selected)
 post_ok = run_power_flow(post_net, mode=power_flow_mode)
 post_report = detect_violations(post_net, include_voltage=power_flow_mode == "ac")
-agent = run_corrective_agent(post_net, post_report, power_flow_mode=power_flow_mode)
+profile_map = {
+    "Auto": "auto",
+    "Balanced": "balanced",
+    "Fast": "fast",
+    "Max speed": "max_speed",
+}
+run_agent_params = inspect.signature(run_corrective_agent).parameters
+if "performance_mode" in run_agent_params:
+    agent = run_corrective_agent(
+        post_net,
+        post_report,
+        power_flow_mode=power_flow_mode,
+        performance_mode=profile_map[compute_profile],
+    )
+else:
+    agent = run_corrective_agent(post_net, post_report, power_flow_mode=power_flow_mode)
 final_report = detect_violations(agent.final_net, include_voltage=power_flow_mode == "ac")
 
 summary_cols = st.columns(4)

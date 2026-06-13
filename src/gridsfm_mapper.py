@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pandapower as pp
 
 
@@ -23,19 +24,23 @@ def pandapower_net_to_gridsfm_pyg_json(
     base_mva = float(getattr(net, "sn_mva", 1.0) or 1.0)
     bus_rows = _in_service_bus_rows(net)
     bus_id_map = {int(bus_idx): pos for pos, bus_idx in enumerate(bus_rows.index.tolist())}
-    slack_buses = set(int(row.bus) for _, row in _in_service_rows(net.ext_grid).iterrows()) if len(net.ext_grid) else set()
-    pv_buses = set(int(row.bus) for _, row in _in_service_rows(net.gen).iterrows()) if len(net.gen) else set()
+    slack_buses = set(
+        _in_service_rows(net.ext_grid)["bus"].astype(int).tolist()
+    ) if len(net.ext_grid) and "bus" in net.ext_grid.columns else set()
+    pv_buses = set(
+        _in_service_rows(net.gen)["bus"].astype(int).tolist()
+    ) if len(net.gen) and "bus" in net.gen.columns else set()
 
-    buses = []
-    for bus_idx, row in bus_rows.iterrows():
-        bus_idx = int(bus_idx)
-        bus_type = 3 if bus_idx in slack_buses else 2 if bus_idx in pv_buses else 1
-        buses.append([
-            _finite_float(row.get("vn_kv", 0.0)),
-            float(bus_type),
-            _voltage_limit(row.get("min_vm_pu"), 0.95),
-            _voltage_limit(row.get("max_vm_pu"), 1.05),
-        ])
+    bus_indices = bus_rows.index.astype(int)
+    vn_kv_values = _column_values(bus_rows, "vn_kv", 0.0)
+    min_vm_values = _column_values(bus_rows, "min_vm_pu", 0.95)
+    max_vm_values = _column_values(bus_rows, "max_vm_pu", 1.05)
+    bus_types = [3 if bus_idx in slack_buses else 2 if bus_idx in pv_buses else 1 for bus_idx in bus_indices]
+
+    buses = [
+        [_finite_float(vn_kv), float(bus_type), _voltage_limit(min_vm, 0.95), _voltage_limit(max_vm, 1.05)]
+        for vn_kv, min_vm, max_vm, bus_type in zip(vn_kv_values, min_vm_values, max_vm_values, bus_types)
+    ]
 
     generators, generator_links, gen_reverse = _generator_nodes(net, bus_id_map, base_mva)
     loads, load_links, load_reverse = _load_nodes(net, bus_id_map, base_mva)
@@ -147,48 +152,52 @@ def _generator_nodes(
     reverse: dict[str, Any] = {}
     gen_id = 0
 
-    for idx, row in _in_service_rows(net.gen).iterrows() if len(net.gen) else []:
+    for row in _in_service_rows(net.gen).itertuples() if len(net.gen) else []:
+        idx = int(row.Index)
         bus = int(row.bus)
         if bus not in bus_id_map:
             continue
+        p_mw = _finite_float(getattr(row, "p_mw", 0.0))
+        max_p_default = max(p_mw, 0.0) * 1.4 + 1.0
         rows.append([
             base_mva,
             0.0,
-            _mw(row.get("min_p_mw", 0.0), base_mva),
-            _mw(row.get("max_p_mw", max(float(row.p_mw), 0.0) * 1.4 + 1.0), base_mva),
+            _mw(getattr(row, "min_p_mw", 0.0), base_mva),
+            _mw(getattr(row, "max_p_mw", max_p_default), base_mva),
             0.0,
-            _mw(row.get("min_q_mvar", -base_mva), base_mva),
-            _mw(row.get("max_q_mvar", base_mva), base_mva),
-            _finite_float(row.get("vm_pu", 1.0)),
+            _mw(getattr(row, "min_q_mvar", -base_mva), base_mva),
+            _mw(getattr(row, "max_q_mvar", base_mva), base_mva),
+            _finite_float(getattr(row, "vm_pu", 1.0)),
             0.0,
             1.0,
             0.0,
         ])
         edge_index[0].append(gen_id)
         edge_index[1].append(bus_id_map[bus])
-        reverse[str(gen_id)] = {"source": "gen", "pandapower_index": int(idx)}
+        reverse[str(gen_id)] = {"source": "gen", "pandapower_index": idx}
         gen_id += 1
 
-    for idx, row in _in_service_rows(net.ext_grid).iterrows() if len(net.ext_grid) else []:
+    for row in _in_service_rows(net.ext_grid).itertuples() if len(net.ext_grid) else []:
+        idx = int(row.Index)
         bus = int(row.bus)
         if bus not in bus_id_map:
             continue
         rows.append([
             base_mva,
             0.0,
-            _mw(row.get("min_p_mw", -10.0 * base_mva), base_mva),
-            _mw(row.get("max_p_mw", 10.0 * base_mva), base_mva),
+            _mw(getattr(row, "min_p_mw", -10.0 * base_mva), base_mva),
+            _mw(getattr(row, "max_p_mw", 10.0 * base_mva), base_mva),
             0.0,
-            _mw(row.get("min_q_mvar", -10.0 * base_mva), base_mva),
-            _mw(row.get("max_q_mvar", 10.0 * base_mva), base_mva),
-            _finite_float(row.get("vm_pu", 1.0)),
+            _mw(getattr(row, "min_q_mvar", -10.0 * base_mva), base_mva),
+            _mw(getattr(row, "max_q_mvar", 10.0 * base_mva), base_mva),
+            _finite_float(getattr(row, "vm_pu", 1.0)),
             0.0,
             1.0,
             0.0,
         ])
         edge_index[0].append(gen_id)
         edge_index[1].append(bus_id_map[bus])
-        reverse[str(gen_id)] = {"source": "ext_grid", "pandapower_index": int(idx)}
+        reverse[str(gen_id)] = {"source": "ext_grid", "pandapower_index": idx}
         gen_id += 1
 
     return rows, edge_index, reverse
@@ -203,14 +212,15 @@ def _load_nodes(
     edge_index = [[], []]
     reverse: dict[str, int] = {}
     load_id = 0
-    for idx, row in _in_service_rows(net.load).iterrows() if len(net.load) else []:
+    for row in _in_service_rows(net.load).itertuples() if len(net.load) else []:
+        idx = int(row.Index)
         bus = int(row.bus)
         if bus not in bus_id_map:
             continue
-        rows.append([_mw(row.get("p_mw", 0.0), base_mva), _mw(row.get("q_mvar", 0.0), base_mva)])
+        rows.append([_mw(getattr(row, "p_mw", 0.0), base_mva), _mw(getattr(row, "q_mvar", 0.0), base_mva)])
         edge_index[0].append(load_id)
         edge_index[1].append(bus_id_map[bus])
-        reverse[str(load_id)] = int(idx)
+        reverse[str(load_id)] = idx
         load_id += 1
     return rows, edge_index, reverse
 
@@ -226,14 +236,15 @@ def _shunt_nodes(
     edge_index = [[], []]
     reverse: dict[str, int] = {}
     shunt_id = 0
-    for idx, row in _in_service_rows(net.shunt).iterrows():
+    for row in _in_service_rows(net.shunt).itertuples():
+        idx = int(row.Index)
         bus = int(row.bus)
         if bus not in bus_id_map:
             continue
-        rows.append([_mw(row.get("p_mw", 0.0), base_mva), _mw(row.get("q_mvar", 0.0), base_mva)])
+        rows.append([_mw(getattr(row, "p_mw", 0.0), base_mva), _mw(getattr(row, "q_mvar", 0.0), base_mva)])
         edge_index[0].append(shunt_id)
         edge_index[1].append(bus_id_map[bus])
-        reverse[str(shunt_id)] = int(idx)
+        reverse[str(shunt_id)] = idx
         shunt_id += 1
     return rows, edge_index, reverse
 
@@ -246,7 +257,8 @@ def _line_edges(
     edge_index = [[], []]
     reverse: dict[str, int] = {}
     edge_id = 0
-    for idx, row in _in_service_rows(net.line).iterrows() if len(net.line) else []:
+    for row in _in_service_rows(net.line).itertuples() if len(net.line) else []:
+        idx = int(row.Index)
         from_bus = int(row.from_bus)
         to_bus = int(row.to_bus)
         if from_bus not in bus_id_map or to_bus not in bus_id_map:
@@ -254,7 +266,7 @@ def _line_edges(
         edge_index[0].append(bus_id_map[from_bus])
         edge_index[1].append(bus_id_map[to_bus])
         attrs.append(_line_attr(row, net, from_bus))
-        reverse[str(edge_id)] = int(idx)
+        reverse[str(edge_id)] = idx
         edge_id += 1
     return attrs, edge_index, reverse
 
@@ -267,7 +279,8 @@ def _trafo_edges(
     edge_index = [[], []]
     reverse: dict[str, int] = {}
     edge_id = 0
-    for idx, row in _in_service_rows(net.trafo).iterrows() if len(net.trafo) else []:
+    for row in _in_service_rows(net.trafo).itertuples() if len(net.trafo) else []:
+        idx = int(row.Index)
         hv = int(row.hv_bus)
         lv = int(row.lv_bus)
         if hv not in bus_id_map or lv not in bus_id_map:
@@ -277,17 +290,17 @@ def _trafo_edges(
         attrs.append([
             -30.0,
             30.0,
-            _finite_float(row.get("vkr_percent", 0.0)) / 100.0,
-            _finite_float(row.get("vk_percent", 0.0)) / 100.0,
-            _finite_float(row.get("sn_mva", 0.0)),
+            _finite_float(getattr(row, "vkr_percent", 0.0)) / 100.0,
+            _finite_float(getattr(row, "vk_percent", 0.0)) / 100.0,
+            _finite_float(getattr(row, "sn_mva", 0.0)),
             0.0,
             0.0,
-            _finite_float(row.get("tap_pos", 0.0)),
-            _finite_float(row.get("shift_degree", 0.0)),
+            _finite_float(getattr(row, "tap_pos", 0.0)),
+            _finite_float(getattr(row, "shift_degree", 0.0)),
             0.0,
             0.0,
         ])
-        reverse[str(edge_id)] = int(idx)
+        reverse[str(edge_id)] = idx
         edge_id += 1
     return attrs, edge_index, reverse
 
@@ -296,13 +309,19 @@ def _line_attr(row: Any, net: pp.pandapowerNet, from_bus: int) -> list[float]:
     base_kv = _finite_float(net.bus.at[from_bus, "vn_kv"] if "vn_kv" in net.bus.columns else 1.0)
     base_mva = float(getattr(net, "sn_mva", 1.0) or 1.0)
     z_base = base_kv * base_kv / base_mva if base_mva else 1.0
-    length = _finite_float(row.get("length_km", 1.0), default=1.0)
-    r = _finite_float(row.get("r_ohm_per_km", 0.0)) * length / z_base
-    x = _finite_float(row.get("x_ohm_per_km", 0.0)) * length / z_base
-    c_nf = _finite_float(row.get("c_nf_per_km", 0.0)) * length
+    length = _finite_float(getattr(row, "length_km", 1.0), default=1.0)
+    r = _finite_float(getattr(row, "r_ohm_per_km", 0.0)) * length / z_base
+    x = _finite_float(getattr(row, "x_ohm_per_km", 0.0)) * length / z_base
+    c_nf = _finite_float(getattr(row, "c_nf_per_km", 0.0)) * length
     b = 2.0 * math.pi * 50.0 * c_nf * 1e-9 * z_base
-    rate = _finite_float(row.get("max_i_ka", 0.0)) * base_kv * math.sqrt(3.0)
+    rate = _finite_float(getattr(row, "max_i_ka", 0.0)) * base_kv * math.sqrt(3.0)
     return [-30.0, 30.0, b / 2.0, b / 2.0, r, x, rate]
+
+
+def _column_values(frame: pd.DataFrame, column: str, default: float) -> list[float]:
+    if column not in frame.columns:
+        return [default] * len(frame)
+    return frame[column].fillna(default).tolist()
 
 
 def _validate_rows(name: str, rows: list[Any], width: int) -> None:
