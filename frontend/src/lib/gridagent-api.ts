@@ -4,6 +4,8 @@
 export const GRIDAGENT_API_URL =
   (import.meta.env.VITE_GRIDAGENT_API_URL as string | undefined) ?? "";
 
+const BACKEND_BASE_URL = GRIDAGENT_API_URL.trim().replace(/\/$/, "");
+
 export interface GridStats {
   contingencies: number;
   dangerous: number;
@@ -36,8 +38,19 @@ export interface RedispatchProposal {
   tools: string[];
 }
 
+export interface AgentSummary {
+  accepted: boolean;
+  greedySteps: number;
+  totalCost: number;
+  safetyDelta: number;
+  stopReason: string;
+}
+
 export interface DashboardWorkflowResult {
+  runId: string;
+  networkId: string;
   stats: GridStats;
+  agentSummary: AgentSummary;
   proposal: RedispatchProposal;
   comparison: ComparisonMetrics;
   gridsfm: GridSFMMetrics | null;
@@ -66,7 +79,49 @@ export interface CaseOption {
   id: string;
   label: string;
   engines: string[];
+  description?: string;
 }
+
+const STREAMLIT_NETWORK_OPTIONS: CaseOption[] = [
+  {
+    id: "ieee14",
+    label: "IEEE 14-bus",
+    description:
+      "Small MATPOWER-derived system with generators, lines, loads, and transformers.",
+    engines: ["pandapower"],
+  },
+  {
+    id: "ieee9",
+    label: "IEEE 9-bus",
+    description: "Very small transmission test case for fast demonstrations.",
+    engines: ["pandapower"],
+  },
+  {
+    id: "ieee30",
+    label: "IEEE 30-bus",
+    description:
+      "Medium-small test case with more branches and generators than IEEE 14-bus.",
+    engines: ["pandapower"],
+  },
+  {
+    id: "ieee57",
+    label: "IEEE 57-bus",
+    description: "Medium transmission test case with a richer N-1 contingency space.",
+    engines: ["pandapower"],
+  },
+  {
+    id: "ieee118",
+    label: "IEEE 118-bus",
+    description: "Larger IEEE test case suited for DC N-1 screening experiments.",
+    engines: ["pandapower"],
+  },
+  {
+    id: "case300",
+    label: "IEEE 300-bus",
+    description: "Large MATPOWER-derived case for more substantial DC screening runs.",
+    engines: ["pandapower"],
+  },
+];
 
 interface ApiEnvelope<T> {
   success: boolean;
@@ -122,34 +177,85 @@ export interface GridScenarioConfig {
   seed: number;
 }
 
+export type RecommendationMode = "baseline" | "llm_assisted";
+export type ComputeProfile = "auto" | "balanced" | "fast" | "max_speed";
+
+export interface WorkflowOptions {
+  recommendationMode: RecommendationMode;
+  computeProfile: ComputeProfile;
+}
+
 let activeRunId: string | null = null;
 let activeRunPromise: Promise<string> | null = null;
 let scenarioConfig: GridScenarioConfig = { networkId: "case1888_rte", seed: 42 };
+let scenarioEpoch = 0;
+let workflowOptions: WorkflowOptions = {
+  recommendationMode: "baseline",
+  computeProfile: "fast",
+};
+
+function profileToTopK(profile: ComputeProfile): number {
+  if (profile === "max_speed") return 2;
+  if (profile === "fast") return 5;
+  if (profile === "balanced") return 8;
+  return 5;
+}
 
 async function requestBackend<T>(
   path: string,
   init?: RequestInit,
   timeoutMs: number = 60000,
 ): Promise<T> {
-  if (!GRIDAGENT_API_URL) throw new Error("VITE_GRIDAGENT_API_URL is not set.");
+  if (import.meta.env.PROD && !BACKEND_BASE_URL) {
+    throw new Error(
+      "VITE_GRIDAGENT_API_URL must be set for production builds (example: https://api.example.com).",
+    );
+  }
+  if (import.meta.env.PROD && BACKEND_BASE_URL) {
+    try {
+      const parsed = new URL(BACKEND_BASE_URL);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error("invalid protocol");
+      }
+    } catch {
+      throw new Error("VITE_GRIDAGENT_API_URL must be a valid absolute http(s) URL.");
+    }
+  }
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  try {
+  const parseEnvelope = (envelope: ApiEnvelope<T>, requestUrl: string): T => {
+    if (!envelope.success || envelope.data == null) {
+      throw new Error(envelope.error ?? `Empty API response for ${requestUrl}`);
+    }
+    return envelope.data;
+  };
+
+  const fetchAndParse = async (requestUrl: string): Promise<T> => {
     const mergedHeaders = {
       Accept: "application/json",
       ...(init?.headers as Record<string, string> | undefined),
     };
-    const res = await fetch(`${GRIDAGENT_API_URL}${path}`, {
+    const res = await fetch(requestUrl, {
       method: init?.method ?? "GET",
       body: init?.body,
       headers: mergedHeaders,
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`Request failed (${res.status}) for ${path}`);
+    if (!res.ok) throw new Error(`Request failed (${res.status}) for ${requestUrl}`);
     const envelope = (await res.json()) as ApiEnvelope<T>;
-    if (!envelope.success || envelope.data == null)
-      throw new Error(envelope.error ?? `Empty API response for ${path}`);
-    return envelope.data;
+    return parseEnvelope(envelope, requestUrl);
+  };
+
+  try {
+    const requestUrl = `${BACKEND_BASE_URL}${path}`;
+    try {
+      return await fetchAndParse(requestUrl);
+    } catch (primaryError) {
+      if (!import.meta.env.DEV || !BACKEND_BASE_URL) {
+        throw primaryError;
+      }
+      return await fetchAndParse(path);
+    }
   } finally {
     clearTimeout(timeoutId);
   }
@@ -159,19 +265,32 @@ async function ensureRunId(): Promise<string> {
   if (activeRunId) return activeRunId;
   if (activeRunPromise) return activeRunPromise;
 
-  activeRunPromise = (async () => {
+  const requestEpoch = scenarioEpoch;
+  const requestScenario = { ...scenarioConfig };
+  const runPromise = (async () => {
     const data = await requestBackend<RunCreateData>("/api/v1/runs", {
       method: "POST",
-      body: JSON.stringify({ network_id: scenarioConfig.networkId, seed: scenarioConfig.seed }),
+      body: JSON.stringify({ network_id: requestScenario.networkId, seed: requestScenario.seed }),
       headers: { "Content-Type": "application/json" },
     });
+
+    // If scenario changed while creating a run, discard stale run ID and build a fresh run.
+    if (requestEpoch !== scenarioEpoch) {
+      return ensureRunId();
+    }
+
     activeRunId = data.run_id;
     return activeRunId;
   })();
+  activeRunPromise = runPromise;
 
-  const runId = await activeRunPromise;
-  activeRunPromise = null;
-  return runId;
+  try {
+    return await runPromise;
+  } finally {
+    if (activeRunPromise === runPromise) {
+      activeRunPromise = null;
+    }
+  }
 }
 
 function mapStatus(dangerousCount: number): "secure" | "violation" {
@@ -232,6 +351,7 @@ function proposalFromResponses(screen: ScreenData, recommend: RecommendData): Re
 
 export const gridAgent = {
   setScenario: (config: GridScenarioConfig): void => {
+    scenarioEpoch += 1;
     scenarioConfig = { ...config, seed: Number.isFinite(config.seed) ? Math.trunc(config.seed) : 42 };
     activeRunId = null;
     activeRunPromise = null;
@@ -239,18 +359,41 @@ export const gridAgent = {
 
   getScenario: (): GridScenarioConfig => ({ ...scenarioConfig }),
 
+  setWorkflowOptions: (options: Partial<WorkflowOptions>): void => {
+    const nextProfile = options.computeProfile ?? workflowOptions.computeProfile;
+
+    workflowOptions = {
+      recommendationMode: options.recommendationMode ?? workflowOptions.recommendationMode,
+      computeProfile: nextProfile,
+    };
+  },
+
+  getWorkflowOptions: (): WorkflowOptions => ({ ...workflowOptions }),
+
   prepareRun: async (): Promise<string> => ensureRunId(),
 
   listCases: async (): Promise<CaseOption[]> => {
     const data = await requestBackend<{ cases: CaseOption[] }>("/api/v1/cases");
-    return data.cases;
+    const merged = new Map<string, CaseOption>();
+    for (const item of STREAMLIT_NETWORK_OPTIONS) {
+      merged.set(item.id, item);
+    }
+    for (const item of data.cases) {
+      const existing = merged.get(item.id);
+      merged.set(item.id, {
+        ...existing,
+        ...item,
+        description: item.description ?? existing?.description,
+      });
+    }
+    return Array.from(merged.values());
   },
 
   stats: async (): Promise<GridStats> => {
     const runId = await ensureRunId();
     const data = await requestBackend<ScreenData>(`/api/v1/runs/${runId}/screen`, {
       method: "POST",
-      body: JSON.stringify({ top_k: 5 }),
+      body: JSON.stringify({ top_k: profileToTopK(workflowOptions.computeProfile) }),
       headers: { "Content-Type": "application/json" },
     });
     return statsFromScreen(data);
@@ -261,12 +404,12 @@ export const gridAgent = {
     const [screen, recommend] = await Promise.all([
       requestBackend<ScreenData>(`/api/v1/runs/${runId}/screen`, {
         method: "POST",
-        body: JSON.stringify({ top_k: 3 }),
+        body: JSON.stringify({ top_k: profileToTopK(workflowOptions.computeProfile) }),
         headers: { "Content-Type": "application/json" },
       }),
       requestBackend<RecommendData>(`/api/v1/runs/${runId}/recommend`, {
         method: "POST",
-        body: JSON.stringify({ mode: "baseline" }),
+        body: JSON.stringify({ mode: workflowOptions.recommendationMode }),
         headers: { "Content-Type": "application/json" },
       }),
     ]);
@@ -354,7 +497,7 @@ export const gridAgent = {
     });
     const screen = await requestBackend<ScreenData>(`/api/v1/runs/${runId}/screen`, {
       method: "POST",
-      body: JSON.stringify({ top_k: 5 }),
+      body: JSON.stringify({ top_k: profileToTopK(workflowOptions.computeProfile) }),
       headers: { "Content-Type": "application/json" },
     });
     emit({
@@ -372,7 +515,7 @@ export const gridAgent = {
     });
     const recommend = await requestBackend<RecommendData>(`/api/v1/runs/${runId}/recommend`, {
       method: "POST",
-      body: JSON.stringify({ mode: "baseline" }),
+      body: JSON.stringify({ mode: workflowOptions.recommendationMode }),
       headers: { "Content-Type": "application/json" },
     });
     emit({
@@ -424,7 +567,16 @@ export const gridAgent = {
     }
 
     return {
+      runId,
+      networkId: screen.network_id,
       stats: statsFromScreen(screen),
+      agentSummary: {
+        accepted: recommend.accepted,
+        greedySteps: recommend.proposals.length,
+        totalCost: recommend.total_cost,
+        safetyDelta: recommend.safety_delta,
+        stopReason: recommend.accepted ? "stable" : "no_improving_candidate",
+      },
       proposal: proposalFromResponses(screen, recommend),
       comparison: {
         winner: compare.winner,

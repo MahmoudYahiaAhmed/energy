@@ -19,10 +19,13 @@ import {
 } from "lucide-react";
 import {
   gridAgent,
+  type AgentSummary,
   type CaseOption,
   type ComparisonMetrics,
+  type ComputeProfile,
   type GridSFMMetrics,
   type GridStats,
+  type RecommendationMode,
   type RedispatchProposal,
   type WorkflowLogEntry,
 } from "@/lib/gridagent-api";
@@ -49,15 +52,26 @@ export const Route = createFileRoute("/")({
 
 function Index() {
   const [stats, setStats] = useState<GridStats | null>(null);
+  const [agentSummary, setAgentSummary] = useState<AgentSummary | null>(null);
   const [proposal, setProposal] = useState<RedispatchProposal | null>(null);
   const [comparison, setComparison] = useState<ComparisonMetrics | null>(null);
   const [gridsfm, setGridsfm] = useState<GridSFMMetrics | null>(null);
   const [cases, setCases] = useState<CaseOption[]>([]);
-  const [selectedCase, setSelectedCase] = useState(gridAgent.getScenario().networkId);
+  const currentScenario = gridAgent.getScenario();
+  const currentOptions = gridAgent.getWorkflowOptions();
+  const [selectedCase, setSelectedCase] = useState(currentScenario.networkId);
+  const [seed, setSeed] = useState(currentScenario.seed);
+  const [computeProfile, setComputeProfile] = useState<ComputeProfile>(currentOptions.computeProfile);
+  const [recommendationMode, setRecommendationMode] =
+    useState<RecommendationMode>(currentOptions.recommendationMode);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [workflowLogs, setWorkflowLogs] = useState<WorkflowLogEntry[]>([]);
+  const [lastRunId, setLastRunId] = useState<string | null>(null);
+  const [networkId, setNetworkId] = useState<string>(currentScenario.networkId);
   const [isRunning, setIsRunning] = useState(false);
   const loadedRef = useRef(false);
+  const selectedCaseLabel =
+    cases.find((item) => item.id === selectedCase)?.label ?? selectedCase;
 
   async function loadDashboard(): Promise<void> {
     if (isRunning) return;
@@ -65,6 +79,7 @@ function Index() {
       setIsRunning(true);
       setErrorMessage(null);
       setStats(null);
+      setAgentSummary(null);
       setProposal(null);
       setComparison(null);
       setGridsfm(null);
@@ -76,7 +91,10 @@ function Index() {
           return [...next, entry];
         });
       });
+      setLastRunId(result.runId);
+      setNetworkId(result.networkId);
       setStats(result.stats);
+      setAgentSummary(result.agentSummary);
       setProposal(result.proposal);
       setComparison(result.comparison);
       setGridsfm(result.gridsfm);
@@ -84,9 +102,11 @@ function Index() {
       const message = error instanceof Error ? error.message : "Unknown backend error.";
       setErrorMessage(message);
       setStats(null);
+      setAgentSummary(null);
       setProposal(null);
       setComparison(null);
       setGridsfm(null);
+      setLastRunId(null);
       setWorkflowLogs((current) => [
         ...current.filter((item) => item.id !== "failed"),
         { id: "failed", title: "Workflow stopped", detail: message, status: "warn" },
@@ -97,7 +117,22 @@ function Index() {
   }
 
   function applyScenario(): void {
-    gridAgent.setScenario({ networkId: selectedCase, seed: 42 });
+    gridAgent.setScenario({ networkId: selectedCase, seed });
+    gridAgent.setWorkflowOptions({
+      computeProfile,
+      recommendationMode,
+    });
+    void loadDashboard();
+  }
+
+  function runWithNewSeed(): void {
+    const nextSeed = seed + 1;
+    setSeed(nextSeed);
+    gridAgent.setScenario({ networkId: selectedCase, seed: nextSeed });
+    gridAgent.setWorkflowOptions({
+      computeProfile,
+      recommendationMode,
+    });
     void loadDashboard();
   }
 
@@ -123,15 +158,30 @@ function Index() {
         <CaseSelector
           cases={cases}
           selected={selectedCase}
+          seed={seed}
+          computeProfile={computeProfile}
+          recommendationMode={recommendationMode}
+          lastRunId={lastRunId}
           onSelect={setSelectedCase}
+          onSeedChange={setSeed}
+          onComputeProfileChange={setComputeProfile}
+          onRecommendationModeChange={setRecommendationMode}
           onRun={applyScenario}
+          onRunNewSeed={runWithNewSeed}
           isRunning={isRunning}
         />
         <WorkflowLog logs={workflowLogs} isRunning={isRunning} />
-        <Stats stats={stats} />
+        <Stats stats={stats} agentSummary={agentSummary} />
         <div className="mt-6 grid gap-6 lg:grid-cols-2">
-          <GridStatePanel proposal={proposal} />
-          <ReasoningPanel proposal={proposal} />
+          <GridStatePanel
+            proposal={proposal}
+            networkLabel={stats?.network ?? selectedCaseLabel}
+            networkId={networkId}
+            hasStats={Boolean(stats)}
+            runId={lastRunId}
+            seed={seed}
+          />
+          <ReasoningPanel proposal={proposal} agentSummary={agentSummary} />
         </div>
         <ComparisonPanel comparison={comparison} />
         <GridSFMPanel gridsfm={gridsfm} />
@@ -146,14 +196,30 @@ function Index() {
 function CaseSelector({
   cases,
   selected,
+  seed,
+  computeProfile,
+  recommendationMode,
+  lastRunId,
   onSelect,
+  onSeedChange,
+  onComputeProfileChange,
+  onRecommendationModeChange,
   onRun,
+  onRunNewSeed,
   isRunning,
 }: {
   cases: CaseOption[];
   selected: string;
+  seed: number;
+  computeProfile: ComputeProfile;
+  recommendationMode: RecommendationMode;
+  lastRunId: string | null;
   onSelect: (id: string) => void;
+  onSeedChange: (value: number) => void;
+  onComputeProfileChange: (value: ComputeProfile) => void;
+  onRecommendationModeChange: (value: RecommendationMode) => void;
   onRun: () => void;
+  onRunNewSeed: () => void;
   isRunning: boolean;
 }) {
   const grouped = cases.reduce<Record<string, CaseOption[]>>((acc, c) => {
@@ -190,6 +256,54 @@ function CaseSelector({
             ))}
           </select>
         </div>
+        <div className="w-32">
+          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Seed
+          </label>
+          <input
+            type="number"
+            value={seed}
+            min={0}
+            max={2147483647}
+            step={1}
+            onChange={(e) => {
+              const next = Number.parseInt(e.target.value || "42", 10);
+              const clamped = Number.isFinite(next)
+                ? Math.min(2147483647, Math.max(0, next))
+                : 42;
+              onSeedChange(clamped);
+            }}
+            className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none ring-primary/30 focus:ring"
+          />
+        </div>
+        <div className="w-40">
+          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Compute profile
+          </label>
+          <select
+            value={computeProfile}
+            onChange={(e) => onComputeProfileChange(e.target.value as ComputeProfile)}
+            className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none ring-primary/30 focus:ring"
+          >
+            <option value="auto">Auto</option>
+            <option value="balanced">Balanced</option>
+            <option value="fast">Fast</option>
+            <option value="max_speed">Max speed</option>
+          </select>
+        </div>
+        <div className="w-44">
+          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Recommendation mode
+          </label>
+          <select
+            value={recommendationMode}
+            onChange={(e) => onRecommendationModeChange(e.target.value as RecommendationMode)}
+            className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none ring-primary/30 focus:ring"
+          >
+            <option value="baseline">Baseline</option>
+            <option value="llm_assisted">LLM assisted</option>
+          </select>
+        </div>
         <button
           onClick={onRun}
           disabled={isRunning}
@@ -198,7 +312,18 @@ function CaseSelector({
           {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
           {isRunning ? "Searching" : "Start Search"}
         </button>
+        <button
+          onClick={onRunNewSeed}
+          disabled={isRunning}
+          className="inline-flex min-w-36 items-center justify-center gap-2 rounded-xl border border-border px-5 py-2 text-sm font-semibold transition hover:border-primary/50 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+          {isRunning ? "Searching" : "New Seed Run"}
+        </button>
       </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        Deterministic mode: same network + same seed returns the same result. Use <strong>New Seed Run</strong> to generate a new scenario quickly.
+      </p>
       {selected_case && (
         <div className="mt-3 flex flex-wrap gap-2">
           {selected_case.engines.map((eng) => (
@@ -213,7 +338,15 @@ function CaseSelector({
               {eng}
             </span>
           ))}
-          <span className="text-xs text-muted-foreground self-center">available for this case</span>
+          <span className="text-xs text-muted-foreground self-center">
+            streamlit-style controls applied at frontend workflow level
+          </span>
+          {selected_case.description && (
+            <span className="w-full text-xs text-muted-foreground">{selected_case.description}</span>
+          )}
+          {lastRunId && (
+            <span className="w-full text-xs text-muted-foreground">Last run: {lastRunId}</span>
+          )}
         </div>
       )}
     </section>
@@ -417,43 +550,80 @@ function Tag({ children, color }: { children: React.ReactNode; color: "accent" |
   );
 }
 
-function Stats({ stats }: { stats: GridStats | null }) {
-  const items = [
-    { label: "Contingencies", value: stats?.contingencies ?? "—", sub: stats?.network ?? "IEEE 118-bus" },
+function toneClass(tone: string | undefined, type: "text" | "sub"): string {
+  if (type === "text") {
+    if (tone === "danger") return "text-destructive";
+    if (tone === "ok") return "text-primary";
+    return "";
+  }
+  return tone === "danger" ? "text-destructive/80" : "text-muted-foreground";
+}
+
+function Stats({ stats, agentSummary }: { stats: GridStats | null; agentSummary: AgentSummary | null }) {
+  const curtailment = agentSummary == null ? null : agentSummary.accepted ? "not Required" : "Required";
+  const curtailmentTone: "ok" | "danger" | undefined = agentSummary == null
+    ? undefined
+    : agentSummary.accepted ? "ok" : "danger";
+  type StatsItem = { label: string; value: string | number; sub: string; tone?: "ok" | "warn" | "danger" };
+  const items: StatsItem[] = [
     {
-      label: "Dangerous",
-      value: stats?.dangerous ?? "—",
-      sub: "require redispatch",
-      tone: "danger" as const,
+      label: "Post-contingency violations",
+      value: stats?.dangerous ?? "-",
+      sub: stats?.network ?? "-",
+      tone: stats && stats.dangerous > 0 ? "danger" : "ok",
     },
-    { label: "Avg. solve time", value: stats ? `${stats.avgSolveTimeSec}s` : "—", sub: "per contingency" },
     {
-      label: "Status",
-      value: stats?.status === "secure" ? "N-1 ✓" : "N-1 ⚠",
-      sub: stats?.status === "secure" ? "all lines secure" : "violation detected",
-      tone: stats?.status === "secure" ? ("ok" as const) : ("warn" as const),
+      label: "Greedy steps",
+      value: agentSummary?.greedySteps ?? "-",
+      sub: "accepted corrective actions",
+    },
+    {
+      label: "Curtailment",
+      value: curtailment ?? "-",
+      sub: agentSummary ? "cost " + agentSummary.totalCost.toFixed(1) : "waiting for run",
+      tone: curtailmentTone,
+    },
+    {
+      label: "Safety delta",
+      value: agentSummary != null ? agentSummary.safetyDelta.toFixed(2) : "-",
+      sub: agentSummary != null && agentSummary.safetyDelta > 0 ? "improvement" : "no improvement",
+      tone: agentSummary != null && agentSummary.safetyDelta > 0 ? "ok" : undefined,
     },
   ];
   return (
     <section id="demo" className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {items.map((it) => (
-          <div key={it.label} className="rounded-2xl border border-border/60 bg-card/50 p-4 backdrop-blur">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              {it.label}
-            </div>
-            <div className={`mt-2 text-3xl font-bold tracking-tight ${it.tone === "danger" ? "text-destructive" : it.tone === "ok" ? "text-primary" : it.tone === "warn" ? "text-[color:var(--warning)]" : ""}`}>
-              {it.value}
-            </div>
-            <div className={`mt-1 text-xs ${it.tone === "danger" ? "text-destructive/80" : "text-muted-foreground"}`}>
-              {it.sub}
-            </div>
+      {items.map((it) => (
+        <div key={it.label} className="rounded-2xl border border-border/60 bg-card/50 p-4 backdrop-blur">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {it.label}
           </div>
-        ))}
-      </section>
+          <div className={"mt-2 text-3xl font-bold tracking-tight " + toneClass(it.tone, "text")}>
+            {it.value}
+          </div>
+          <div className={"mt-1 text-xs " + toneClass(it.tone, "sub")}>
+            {it.sub}
+          </div>
+        </div>
+      ))}
+    </section>
   );
 }
 
-function GridStatePanel({ proposal }: { proposal: RedispatchProposal | null }) {
+function GridStatePanel({
+  proposal,
+  networkLabel,
+  networkId,
+  hasStats,
+  runId,
+  seed,
+}: {
+  proposal: RedispatchProposal | null;
+  networkLabel: string;
+  networkId: string;
+  hasStats: boolean;
+  runId: string | null;
+  seed: number;
+}) {
   return (
     <div className="rounded-2xl border border-border/60 bg-card/50 p-5 backdrop-blur">
       <div className="flex items-start justify-between gap-3">
@@ -462,14 +632,19 @@ function GridStatePanel({ proposal }: { proposal: RedispatchProposal | null }) {
             Grid state
           </div>
           <h3 className="mt-1 text-lg font-semibold">
-            IEEE 118-bus — after line {proposal?.trippedLine ?? "—"} trip
+            {networkLabel} — after contingency {proposal?.trippedLine ?? "—"}
           </h3>
         </div>
-        <span className="rounded-full border border-[color:var(--warning)]/40 bg-[color:var(--warning)]/10 px-3 py-1 text-xs font-medium text-[color:var(--warning)]">
-          Overload detected
-        </span>
+        {hasStats && (
+          <span className="rounded-full border border-[color:var(--warning)]/40 bg-[color:var(--warning)]/10 px-3 py-1 text-xs font-medium text-[color:var(--warning)]">
+            Overload detected
+          </span>
+        )}
       </div>
-      <GridDiagram loadingPct={proposal?.loadingPct ?? 109} />
+      <div className="mt-2 text-xs text-muted-foreground">
+        Run {runId ?? "-"} • Seed {seed}
+      </div>
+      <NetworkDiagram networkId={networkId} trippedLine={proposal?.trippedLine ?? null} loadingPct={proposal?.loadingPct ?? 0} />
       <div className="mt-4 flex flex-wrap gap-4 text-xs text-muted-foreground">
         <Legend swatch={<span className="inline-block h-[2px] w-6 border-t-2 border-dashed border-destructive" />}>
           tripped line
@@ -494,87 +669,273 @@ function Legend({ swatch, children }: { swatch: React.ReactNode; children: React
   );
 }
 
-function GridDiagram({ loadingPct }: { loadingPct: number }) {
-  // Stylized 6-bus subnetwork inspired by the screenshot
-  const buses = [
-    { id: "15", x: 70, y: 70, gen: true },
-    { id: "17", x: 200, y: 55, hot: true },
-    { id: "13", x: 430, y: 95, gen: true },
-    { id: "16", x: 80, y: 200 },
-    { id: "19", x: 250, y: 220 },
-    { id: "20", x: 370, y: 215 },
-  ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-network topology layouts
+// ─────────────────────────────────────────────────────────────────────────────
+interface BusDef { id: number; x: number; y: number; gen: boolean }
+interface EdgeDef { id: number; from: number; to: number; trafo?: boolean }
+interface NetLayout { buses: BusDef[]; edges: EdgeDef[] }
+
+// IEEE 9-bus (WSCC), pandapower 0-indexed buses + lines
+const LAYOUT_IEEE9: NetLayout = {
+  buses: [
+    { id: 0, x: 250, y: 22,  gen: true  },
+    { id: 1, x:  38, y: 212, gen: true  },
+    { id: 2, x: 462, y: 212, gen: true  },
+    { id: 3, x: 250, y: 80,  gen: false },
+    { id: 4, x: 375, y: 148, gen: false },
+    { id: 5, x: 375, y: 210, gen: false },
+    { id: 6, x: 250, y: 252, gen: false },
+    { id: 7, x: 125, y: 210, gen: false },
+    { id: 8, x: 125, y: 148, gen: false },
+  ],
+  edges: [
+    { id: 0, from: 0, to: 3, trafo: true  }, // 1-4
+    { id: 1, from: 3, to: 4               }, // 4-5
+    { id: 2, from: 4, to: 5               }, // 5-6
+    { id: 3, from: 2, to: 5, trafo: true  }, // 3-6
+    { id: 4, from: 5, to: 6               }, // 6-7
+    { id: 5, from: 6, to: 7               }, // 7-8
+    { id: 6, from: 7, to: 1, trafo: true  }, // 8-2
+    { id: 7, from: 7, to: 8               }, // 8-9
+    { id: 8, from: 8, to: 3               }, // 9-4
+  ],
+};
+
+// IEEE 14-bus (MATPOWER), 5 generators, 0-indexed
+const LAYOUT_IEEE14: NetLayout = {
+  buses: [
+    { id:  0, x:  65, y:  50, gen: true  },
+    { id:  1, x: 190, y:  30, gen: true  },
+    { id:  2, x: 305, y:  62, gen: true  },
+    { id:  3, x: 235, y: 112, gen: false },
+    { id:  4, x: 128, y: 132, gen: false },
+    { id:  5, x: 420, y:  88, gen: true  },
+    { id:  6, x: 378, y: 148, gen: false },
+    { id:  7, x: 460, y: 132, gen: true  },
+    { id:  8, x: 368, y: 192, gen: false },
+    { id:  9, x: 292, y: 208, gen: false },
+    { id: 10, x: 378, y: 232, gen: false },
+    { id: 11, x: 332, y: 255, gen: false },
+    { id: 12, x: 238, y: 252, gen: false },
+    { id: 13, x: 168, y: 212, gen: false },
+  ],
+  edges: [
+    { id:  0, from:  0, to:  1               },
+    { id:  1, from:  0, to:  4               },
+    { id:  2, from:  1, to:  2               },
+    { id:  3, from:  1, to:  3               },
+    { id:  4, from:  1, to:  4               },
+    { id:  5, from:  2, to:  3               },
+    { id:  6, from:  3, to:  4               },
+    { id:  7, from:  3, to:  6, trafo: true  },
+    { id:  8, from:  3, to:  8, trafo: true  },
+    { id:  9, from:  4, to:  5, trafo: true  },
+    { id: 10, from:  5, to: 10               },
+    { id: 11, from:  5, to: 11               },
+    { id: 12, from:  5, to: 12               },
+    { id: 13, from:  6, to:  7, trafo: true  },
+    { id: 14, from:  6, to:  8               },
+    { id: 15, from:  8, to:  9               },
+    { id: 16, from:  8, to: 13               },
+    { id: 17, from:  9, to: 10               },
+    { id: 18, from: 11, to: 12               },
+    { id: 19, from: 12, to: 13               },
+  ],
+};
+
+function buildRingLayout(display: number): NetLayout {
+  const buses: BusDef[] = [];
+  const edges: EdgeDef[] = [];
+  const cx = 250, cy = 148;
+  const hasInner = display > 12;
+  const outer = hasInner ? Math.ceil(display * 0.65) : display;
+  const inner = display - outer;
+  const outerR = hasInner ? 118 : 112;
+  const innerR = 58;
+  for (let i = 0; i < outer; i++) {
+    const a = (2 * Math.PI * i / outer) - Math.PI / 2;
+    buses.push({ id: i, x: Math.round(cx + outerR * Math.cos(a)), y: Math.round(cy + outerR * Math.sin(a)), gen: i % Math.max(2, Math.floor(outer / 4)) === 0 });
+    edges.push({ id: i, from: i, to: (i + 1) % outer });
+  }
+  for (let i = 0; i < inner; i++) {
+    const a = (2 * Math.PI * i / inner) - Math.PI / 2;
+    buses.push({ id: outer + i, x: Math.round(cx + innerR * Math.cos(a)), y: Math.round(cy + innerR * Math.sin(a)), gen: false });
+    edges.push({ id: outer + i, from: outer + i, to: outer + (i + 1) % inner });
+    edges.push({ id: outer + inner + i, from: i % outer, to: outer + i });
+  }
+  return { buses, edges };
+}
+
+const BUS_COUNTS: Record<string, number> = {
+  ieee9: 9, case9: 9,
+  ieee14: 14, case14: 14,
+  ieee30: 30, case30: 30,
+  ieee39: 39, case39: 39,
+  ieee57: 57, case57: 57,
+  ieee118: 118, case118: 118,
+  case300: 300,
+};
+const DISPLAY_COUNTS: Record<string, number> = {
+  ieee30: 30, case30: 30,
+  ieee39: 20, case39: 20,
+  ieee57: 20, case57: 20,
+  ieee118: 18, case118: 18,
+  case300: 18,
+};
+
+function resolveLayout(networkId: string | null | undefined): { layout: NetLayout; busCount: number } {
+  if (!networkId) return { layout: buildRingLayout(12), busCount: 0 };
+  const key = networkId.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (key === 'ieee9' || key === 'case9') return { layout: LAYOUT_IEEE9, busCount: 9 };
+  if (key === 'ieee14' || key === 'case14') return { layout: LAYOUT_IEEE14, busCount: 14 };
+  const busCount = BUS_COUNTS[key] ?? 0;
+  const display = DISPLAY_COUNTS[key] ?? 12;
+  return { layout: buildRingLayout(display), busCount };
+}
+
+function parseComponent(id: string): { type: string; idx: number } | null {
+  const m = id.match(/^(line|gen(?:erator)?)_(\d+)$/);
+  if (!m) return null;
+  return { type: m[1].startsWith('gen') ? 'generator' : 'line', idx: parseInt(m[2], 10) };
+}
+
+function NetworkDiagram({
+  networkId,
+  trippedLine,
+  loadingPct,
+}: {
+  networkId: string | null | undefined;
+  trippedLine: string | null;
+  loadingPct: number;
+}) {
+  const { layout, busCount } = resolveLayout(networkId);
+  const { buses, edges } = layout;
+
+  let trippedEdgeId: number | null = null;
+  let trippedBusId: number | null = null;
+  if (trippedLine) {
+    const parsed = parseComponent(trippedLine);
+    if (parsed) {
+      if (parsed.type === 'line') {
+        const edge = edges.find((e) => e.id === parsed.idx) ?? edges[parsed.idx % Math.max(1, edges.length)];
+        if (edge) trippedEdgeId = edge.id;
+      } else {
+        const genBuses = buses.filter((b) => b.gen);
+        const bus = buses.find((b) => b.id === parsed.idx && b.gen) ?? genBuses[parsed.idx % Math.max(1, genBuses.length)];
+        if (bus) trippedBusId = bus.id;
+      }
+    }
+  }
+
+  const busMap = new Map(buses.map((b) => [b.id, b]));
+
+  const subtitle = busCount > buses.length
+    ? networkId + ' — ' + buses.length + ' of ' + busCount + ' buses shown'
+    : networkId + ' — ' + busCount + (busCount === 1 ? ' bus' : ' buses');
+
   return (
     <div className="mt-4 rounded-xl border border-border/60 bg-background/60 p-3">
+      <p className="mb-2 text-[11px] text-muted-foreground">{subtitle}</p>
       <svg viewBox="0 0 500 280" className="h-64 w-full">
-        {/* base lines */}
-        <g stroke="var(--color-muted-foreground)" strokeOpacity="0.4" strokeWidth="1.5" fill="none">
-          <path d="M70 70 L80 200" />
-          <path d="M80 200 L250 220" />
-          <path d="M250 220 L370 215" />
-          <path d="M370 215 L430 95" />
-          <path d="M200 55 L430 95" />
-        </g>
-        {/* overloaded lines */}
-        <g
-          stroke="var(--warning)"
-          strokeWidth="3"
-          strokeLinecap="round"
-          fill="none"
-          className="pulse-line"
-        >
-          <path d="M70 70 L200 55" />
-          <path d="M200 55 L250 220" />
-          <path d="M250 220 L430 95" />
-        </g>
-        {/* tripped line */}
-        <path
-          d="M200 55 L430 95"
-          stroke="var(--destructive)"
-          strokeWidth="2"
-          strokeDasharray="6 6"
-          className="animate-dash"
-          fill="none"
-        />
-        <text x="285" y="78" fontSize="10" fill="var(--destructive)" fontStyle="italic">
-          tripped
-        </text>
-        <text x="285" y="40" fontSize="11" fill="var(--warning)" fontWeight="600">
-          {loadingPct}% loading
-        </text>
-        {/* buses */}
-        {buses.map((b) => (
-          <g key={b.id}>
-            <circle
-              cx={b.x}
-              cy={b.y}
-              r={b.hot ? 9 : 6}
-              fill={b.hot ? "var(--warning)" : b.gen ? "transparent" : "var(--color-muted-foreground)"}
-              stroke={b.gen ? "var(--accent)" : b.hot ? "var(--warning)" : "var(--color-muted-foreground)"}
-              strokeWidth={b.gen ? 2 : 1}
+        {edges.map((edge) => {
+          const a = busMap.get(edge.from);
+          const b = busMap.get(edge.to);
+          if (!a || !b) return null;
+          const isTripped = edge.id === trippedEdgeId;
+          return (
+            <path
+              key={'e' + edge.id}
+              d={'M' + a.x + ' ' + a.y + ' L' + b.x + ' ' + b.y}
+              stroke={isTripped ? 'var(--destructive)' : edge.trafo ? 'var(--color-primary)' : 'var(--color-muted-foreground)'}
+              strokeOpacity={isTripped ? 1 : edge.trafo ? 0.7 : 0.35}
+              strokeWidth={isTripped ? 2.5 : edge.trafo ? 2 : 1.5}
+              strokeDasharray={isTripped ? '6 5' : 'none'}
+              fill="none"
             />
-            {b.gen && (
-              <text x={b.x} y={b.y + 3} textAnchor="middle" fontSize="9" fill="var(--accent)" fontWeight="700">
-                G
+          );
+        })}
+        {trippedEdgeId !== null && (() => {
+          const edge = edges.find((e) => e.id === trippedEdgeId);
+          if (!edge) return null;
+          const a = busMap.get(edge.from);
+          const b = busMap.get(edge.to);
+          if (!a || !b) return null;
+          const mx = (a.x + b.x) / 2;
+          const my = (a.y + b.y) / 2;
+          return (
+            <g key="trip-label">
+              <text x={mx} y={my - 14} textAnchor="middle" fontSize="10" fill="var(--destructive)" fontStyle="italic">tripped</text>
+              <text x={mx} y={my + 2}  textAnchor="middle" fontSize="11" fill="var(--destructive)" fontWeight="600">{loadingPct}% loading</text>
+            </g>
+          );
+        })()}
+        {trippedBusId !== null && (() => {
+          const b = busMap.get(trippedBusId);
+          if (!b) return null;
+          return (
+            <g key="trip-bus">
+              <circle cx={b.x} cy={b.y} r={14} fill="var(--destructive)" fillOpacity={0.15} stroke="var(--destructive)" strokeWidth={1.5} />
+              <text x={b.x} y={b.y - 20} textAnchor="middle" fontSize="10" fill="var(--destructive)" fontStyle="italic">tripped</text>
+              <text x={b.x} y={b.y + 26} textAnchor="middle" fontSize="11" fill="var(--destructive)" fontWeight="600">{loadingPct}% loading</text>
+            </g>
+          );
+        })()}
+        {buses.map((bus) => {
+          const isTripped = bus.id === trippedBusId;
+          return (
+            <g key={'b' + bus.id}>
+              {isTripped && <circle cx={bus.x} cy={bus.y} r={bus.gen ? 12 : 9} fill="var(--destructive)" fillOpacity={0.2} />}
+              <circle
+                cx={bus.x}
+                cy={bus.y}
+                r={bus.gen ? 8 : 5}
+                fill={isTripped ? 'var(--destructive)' : bus.gen ? 'transparent' : 'var(--color-muted-foreground)'}
+                stroke={isTripped ? 'var(--destructive)' : bus.gen ? 'var(--accent)' : 'var(--color-muted-foreground)'}
+                strokeWidth={bus.gen ? 2 : 1}
+                fillOpacity={isTripped ? 1 : 0.7}
+              />
+              {bus.gen && !isTripped && (
+                <text x={bus.x} y={bus.y + 3} textAnchor="middle" fontSize="8" fill="var(--accent)" fontWeight="700">G</text>
+              )}
+              <text
+                x={bus.x}
+                y={bus.y + (bus.y > 148 ? 20 : -13)}
+                textAnchor="middle"
+                fontSize="9"
+                fill="var(--color-muted-foreground)"
+              >
+                {bus.id}
               </text>
-            )}
-            <text
-              x={b.x}
-              y={b.y + (b.y > 150 ? 22 : -14)}
-              textAnchor="middle"
-              fontSize="10"
-              fill="var(--color-muted-foreground)"
-            >
-              bus {b.id}
-            </text>
-          </g>
-        ))}
+            </g>
+          );
+        })}
       </svg>
     </div>
   );
 }
 
-function ReasoningPanel({ proposal }: { proposal: RedispatchProposal | null }) {
+
+function ReasoningPanel({
+  proposal,
+  agentSummary,
+}: {
+  proposal: RedispatchProposal | null;
+  agentSummary: AgentSummary | null;
+}) {
+  const STOP_REASON_LABELS: Record<string, string> = {
+    already_stable: "post-contingency case was already stable",
+    stable: "reached a stable grid state",
+    no_candidates: "no candidate actions were generated",
+    no_converged_candidate: "no candidate action produced a converged power flow",
+    no_improving_candidate: "no candidate improved the score",
+    max_steps_reached: "maximum greedy step count reached",
+  };
+  const stopLabel = agentSummary
+    ? (STOP_REASON_LABELS[agentSummary.stopReason] ?? agentSummary.stopReason)
+    : null;
+
   return (
     <div className="rounded-2xl border border-border/60 bg-card/50 p-5 backdrop-blur">
       <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -582,7 +943,26 @@ function ReasoningPanel({ proposal }: { proposal: RedispatchProposal | null }) {
       </div>
       <h3 className="mt-1 text-lg font-semibold">Live redispatch proposal</h3>
 
-      <ol className="mt-5 space-y-4">
+      {agentSummary && (
+        <div className="mt-3 rounded-xl border border-border/60 bg-background/50 p-3 text-xs space-y-1">
+          <div className="flex gap-2">
+            <span className="text-muted-foreground w-28 shrink-0">Stop reason</span>
+            <span className="font-mono">{stopLabel}</span>
+          </div>
+          <div className="flex gap-2">
+            <span className="text-muted-foreground w-28 shrink-0">Greedy steps</span>
+            <span className="font-mono">{agentSummary.greedySteps}</span>
+          </div>
+          <div className="flex gap-2">
+            <span className="text-muted-foreground w-28 shrink-0">Curtailment</span>
+            <span className={`font-mono font-semibold ${agentSummary.accepted ? "text-primary" : "text-destructive"}`}>
+              {agentSummary.accepted ? "not Required" : "Required"}
+            </span>
+          </div>
+        </div>
+      )}
+
+      <ol className="mt-4 space-y-4">
         {(proposal?.steps ?? []).map((s) => (
           <li key={s.id} className="flex gap-3">
             <div className="mt-0.5">
@@ -708,13 +1088,13 @@ function ApiIntegration() {
         <h3 className="text-lg font-semibold">Ready to integrate with your Python backend</h3>
       </div>
       <p className="mt-2 text-sm text-muted-foreground">
-        Point this UI at the backend by setting one env var. The UI calls a run-based API flow:
-        create run, screen contingencies, then request a remediation recommendation.
+        The dev server now proxies backend routes automatically to <span className="font-mono">localhost:8000</span>.
+        For production builds, set <span className="font-mono">VITE_GRIDAGENT_API_URL</span> to your backend URL.
       </p>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <CodeBlock
-          title=".env"
+          title="Optional .env override"
           code={`VITE_GRIDAGENT_API_URL=http://localhost:8000`}
         />
         <CodeBlock
