@@ -511,7 +511,7 @@ function Hero() {
   return (
     <header className="mt-6 rounded-3xl border border-border/60 bg-card/50 p-8 backdrop-blur sm:p-12">
       <div className="flex flex-wrap gap-2">
-        <Tag color="accent">Munich Hackathon 2025</Tag>
+        <Tag color="accent">Munich Hackathon 2026</Tag>
         <Tag color="warning">N-1 Security</Tag>
       </div>
       <h1 className="mt-6 max-w-3xl text-balance text-4xl font-bold leading-[1.05] tracking-tight sm:text-5xl md:text-6xl">
